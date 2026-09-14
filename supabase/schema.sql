@@ -24,6 +24,8 @@ create table if not exists profiles (
   max_hp           int not null default 100,
   attack           int not null default 10,
   defense          int not null default 5,
+  actions          int not null default 3000,       -- spendable action points
+  max_actions      int not null default 3000,
   last_tick_at     timestamptz not null default now(),
   last_boss_strike_at timestamptz not null default '1970-01-01',
   last_active_at   timestamptz not null default now(),
@@ -33,6 +35,12 @@ create table if not exists profiles (
 -- case-variant duplicates ("Steve" vs "steve") since both map to the same
 -- fake email, but this guards any future signup path that doesn't.
 create unique index if not exists idx_profiles_username_ci on profiles (lower(username));
+
+-- for a project that already ran this file before "actions" existed:
+-- adds the columns (and backfills existing characters to 3000) harmlessly
+-- if they're already there.
+alter table profiles add column if not exists actions int not null default 3000;
+alter table profiles add column if not exists max_actions int not null default 3000;
 
 create table if not exists guilds (
   id          uuid primary key default gen_random_uuid(),
@@ -292,6 +300,40 @@ begin
   end if;
 
   return query select gained_xp, gained_gold, lvl, dmg;
+end;
+$$;
+
+-- ----------------------------------------------------------------------------
+-- 4b. Action points
+--    Every character starts at 3000/3000. Nothing spends them yet (no
+--    action cost is wired into any RPC below) — this is just the pool and
+--    the manual "refresh" the player clicks to top back up to max_actions.
+--    There's deliberately no cooldown on refresh_actions() yet: since
+--    nothing costs actions right now, refreshing has no effect to limit.
+--    Once training/delving/crafting (see DESIGN.md) actually spend from
+--    this pool, refresh should probably get gated (a cooldown, a real-time
+--    regen rate, or a gold cost) or the pool stops meaning anything.
+-- ----------------------------------------------------------------------------
+
+create or replace function refresh_actions()
+returns int
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  new_actions int;
+begin
+  update profiles
+    set actions = max_actions
+    where id = auth.uid()
+    returning actions into new_actions;
+
+  if not found then
+    raise exception 'no profile for current user';
+  end if;
+
+  return new_actions;
 end;
 $$;
 

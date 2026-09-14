@@ -18,6 +18,20 @@ const state = {
 
 const $ = (id) => document.getElementById(id);
 
+const TICK_INTERVAL_MS = 8_000; // how often idle progress checks in automatically
+
+// drains the action-bar-style tick tracker over TICK_INTERVAL_MS using a
+// plain CSS transition, rather than driving it frame-by-frame from JS
+function resetTickBar() {
+  const fill = $("tick-bar-fill");
+  if (!fill) return;
+  fill.style.transition = "none";
+  fill.style.width = "100%";
+  void fill.offsetWidth; // force a reflow so the next transition actually animates
+  fill.style.transition = `width ${TICK_INTERVAL_MS}ms linear`;
+  fill.style.width = "0%";
+}
+
 // ---------------------------------------------------------------------------
 // Auth
 //
@@ -104,9 +118,13 @@ async function enterGame(user) {
   subscribeChat("global");
   subscribeWhispers();
   await doTick(); // resolve any offline progress immediately
+  resetTickBar();
 
   clearInterval(state.tickTimer);
-  state.tickTimer = setInterval(doTick, 8_000); // how often the client polls for idle progress while the tab is open
+  state.tickTimer = setInterval(async () => {
+    await doTick();
+    resetTickBar();
+  }, TICK_INTERVAL_MS);
 }
 
 function leaveGame() {
@@ -158,7 +176,10 @@ async function doTick() {
   if (state.guild) refreshBoss();
 }
 
-$("btn-tick").addEventListener("click", doTick);
+$("btn-tick").addEventListener("click", async () => {
+  await doTick();
+  resetTickBar(); // clicking early just restarts the countdown from full
+});
 
 // ---------------------------------------------------------------------------
 // Guild
