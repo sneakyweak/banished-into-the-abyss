@@ -234,20 +234,35 @@ function renderEnemy() {
   $("enemy-hp-text").textContent = `${en.enemy_hp} / ${en.max_hp} HP`;
 }
 
-$("btn-strike-enemy").addEventListener("click", async () => {
+// Fired automatically once per idle tick (see doTick() below) instead of
+// from a button — each call costs 1 action, and the server returns
+// out_of_actions=true (not an error) once the pool hits 0 so this can be
+// called unattended every 8s without throwing. Returns a short message for
+// the tick log, or null if there's nothing worth reporting.
+async function autoStrikeEnemy() {
   const { data, error } = await sb.rpc("strike_enemy", { p_enemy_key: TEST_ENEMY_KEY });
-  if (error) return alert(error.message);
+  if (error) {
+    console.error(error);
+    return null;
+  }
   const row = data?.[0];
-  if (row && state.enemy) {
+  if (!row) return null;
+
+  if (row.out_of_actions) {
+    return "Out of actions — click Refresh Actions to keep fighting.";
+  }
+
+  if (state.enemy) {
     state.enemy.enemy_hp = row.enemy_hp;
     state.enemy.max_hp = row.enemy_max_hp;
     renderEnemy();
-    $("tick-log").textContent = row.enemy_defeated
-      ? `You slew the ${state.enemy.name}! +${row.xp_gained} xp, +${row.gold_gained} gold.`
-      : `You struck the ${state.enemy.name} for ${row.damage_dealt} damage.`;
   }
-  await loadProfile(); // picks up updated hp/xp/gold
-});
+
+  const enemyName = state.enemy?.name || "the enemy";
+  return row.enemy_defeated
+    ? `You slew ${enemyName}! +${row.xp_gained} xp, +${row.gold_gained} gold.`
+    : `You struck ${enemyName} for ${row.damage_dealt} damage.`;
+}
 
 async function loadInventory() {
   const { data, error } = await sb
@@ -291,13 +306,23 @@ async function doTick() {
   const { data, error } = await sb.rpc("perform_idle_tick");
   if (error) return console.error(error);
   const row = data?.[0];
-  await loadProfile();
-  if (row && (row.xp_gained > 0 || row.gold_gained > 0)) {
-    $("tick-log").textContent =
-      `+${row.xp_gained} xp, +${row.gold_gained} gold` +
-      (row.boss_damage > 0 ? `, dealt ${row.boss_damage} idle damage to the guild boss` : "");
-  }
   if (state.guild) refreshBoss();
+
+  // one auto-strike against the current enemy per tick — costs 1 action,
+  // stops gracefully once the pool is empty (see autoStrikeEnemy above)
+  const strikeMsg = await autoStrikeEnemy();
+
+  await loadProfile();
+
+  const parts = [];
+  if (row && (row.xp_gained > 0 || row.gold_gained > 0)) {
+    parts.push(
+      `+${row.xp_gained} xp, +${row.gold_gained} gold` +
+        (row.boss_damage > 0 ? `, ${row.boss_damage} idle dmg to guild boss` : "")
+    );
+  }
+  if (strikeMsg) parts.push(strikeMsg);
+  if (parts.length) $("tick-log").textContent = parts.join("  •  ");
 }
 
 $("btn-refresh-actions").addEventListener("click", async () => {

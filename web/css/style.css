@@ -230,12 +230,15 @@ body {
 }
 
 .avatar-portrait {
-  width: 96px;
-  height: 96px;
+  width: 100%;
+  max-width: 220px;
+  aspect-ratio: 1 / 1;
   object-fit: cover;
+  object-position: center 15%;
   border-radius: 8px;
   border: 1px solid var(--border);
   box-shadow: 0 0 14px rgba(168, 85, 247, 0.25);
+  display: block;
 }
 
 .battle-portrait {
@@ -397,14 +400,8 @@ button:disabled { opacity: 0.4; cursor: not-allowed; }
 
 .avatar-box {
   display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 6px;
-  padding: 18px;
+  justify-content: center;
   margin-bottom: 14px;
-  border: 1px dashed var(--border);
-  border-radius: 8px;
-  background: rgba(139, 92, 246, 0.05);
 }
 .avatar-glyph { font-size: 2.4rem; color: var(--accent-bright); text-shadow: 0 0 14px rgba(168, 85, 247, 0.6); }
 
@@ -420,16 +417,18 @@ button:disabled { opacity: 0.4; cursor: not-allowed; }
 .battle-arena {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 14px;
-  margin-bottom: 14px;
+  justify-content: center;
+  gap: 28px;
+  margin: 0 auto 14px;
+  max-width: 520px;
 }
 .battle-side {
   display: flex;
   flex-direction: column;
   align-items: center;
   gap: 4px;
-  flex: 1;
+  flex: 0 1 200px;
+  width: 200px;
   min-width: 0;
 }
 .battle-side .avatar-glyph { font-size: 2rem; }
@@ -457,6 +456,11 @@ button:disabled { opacity: 0.4; cursor: not-allowed; }
 .hp-fill-player { background: linear-gradient(90deg, var(--good), #7fe0a0); }
 #boss-hp-text { font-size: 0.8rem; color: var(--dim); margin-bottom: 8px; }
 .boss-name { font-weight: bold; margin-bottom: 6px; }
+
+.battle-panel { text-align: center; }
+.battle-panel .panel-title { text-align: left; }
+.battle-panel .tick-bar { max-width: 420px; margin-left: auto; margin-right: auto; }
+.battle-panel .log { text-align: center; }
 
 #member-list { list-style: none; padding: 0; margin: 0 0 10px; font-size: 0.85rem; color: var(--dim); }
 #member-list li { padding: 2px 0; }

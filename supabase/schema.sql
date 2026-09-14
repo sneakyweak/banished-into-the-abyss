@@ -20,6 +20,7 @@ create table if not exists profiles (
   xp               bigint not null default 0,
   gold             bigint not null default 0,
   shards           bigint not null default 0,     -- prestige currency
+  class            text not null default 'warrior' check (class in ('warrior','archer','magi','striker')),
   depth            int not null default 0,         -- prestige tier ("how deep")
   hp               int not null default 100,        -- current hp (solo combat)
   max_hp           int not null default 100,
@@ -43,12 +44,14 @@ create unique index if not exists idx_profiles_username_ci on profiles (lower(us
 alter table profiles add column if not exists actions int not null default 3000;
 alter table profiles add column if not exists max_actions int not null default 3000;
 alter table profiles add column if not exists hp int not null default 100;
+alter table profiles add column if not exists class text not null default 'warrior'
+  check (class in ('warrior','archer','magi','striker'));
 
 create table if not exists guilds (
   id          uuid primary key default gen_random_uuid(),
   name        text not null unique check (char_length(name) between 3 and 30),
   tag         text not null unique check (tag ~ '^[A-Za-z0-9]{2,5}$'),
-  leader_id   uuid not null references profiles(id),
+  leader_id   uuid not null references profiles(id) on delete cascade,
   member_cap  int not null default 25,
   created_at  timestamptz not null default now()
 );
@@ -146,8 +149,8 @@ create index if not exists idx_whispers_recipient on whispers(recipient_id, crea
 
 create table if not exists item_transfers (
   id             bigint generated always as identity primary key,
-  sender_id      uuid not null references profiles(id),
-  recipient_id   uuid not null references profiles(id),
+  sender_id      uuid not null references profiles(id) on delete cascade,
+  recipient_id   uuid not null references profiles(id) on delete cascade,
   item_id        uuid references items(id),
   quantity       int,
   gold_amount    bigint,
@@ -159,6 +162,24 @@ create table if not exists item_transfers (
   )
 );
 create index if not exists idx_transfers_sender_time on item_transfers(sender_id, created_at desc);
+
+-- for a project that already ran this file before these referenced
+-- "on delete cascade": without it, deleting a profile that ever led a guild
+-- or sent/received a /send transfer fails with a foreign key violation —
+-- Supabase's Auth admin surfaces that as the unhelpful "Database error
+-- deleting user". Re-pointing the constraints at ON DELETE CASCADE fixes
+-- deletion for both old and new projects; safe to re-run.
+alter table guilds drop constraint if exists guilds_leader_id_fkey;
+alter table guilds add constraint guilds_leader_id_fkey
+  foreign key (leader_id) references profiles(id) on delete cascade;
+
+alter table item_transfers drop constraint if exists item_transfers_sender_id_fkey;
+alter table item_transfers add constraint item_transfers_sender_id_fkey
+  foreign key (sender_id) references profiles(id) on delete cascade;
+
+alter table item_transfers drop constraint if exists item_transfers_recipient_id_fkey;
+alter table item_transfers add constraint item_transfers_recipient_id_fkey
+  foreign key (recipient_id) references profiles(id) on delete cascade;
 
 -- ----------------------------------------------------------------------------
 -- 2. Row Level Security
@@ -251,11 +272,19 @@ language plpgsql
 security definer
 set search_path = public
 as $$
+declare
+  chosen_class text;
 begin
-  insert into public.profiles (id, username)
+  chosen_class := new.raw_user_meta_data->>'class';
+  if chosen_class is null or chosen_class not in ('warrior','archer','magi','striker') then
+    chosen_class := 'warrior'; -- defensive fallback; the client always sends a valid choice
+  end if;
+
+  insert into public.profiles (id, username, class)
   values (
     new.id,
-    coalesce(new.raw_user_meta_data->>'username', 'wanderer_' || substr(new.id::text, 1, 8))
+    coalesce(new.raw_user_meta_data->>'username', 'wanderer_' || substr(new.id::text, 1, 8)),
+    chosen_class
   );
   return new;
 end;
@@ -375,11 +404,17 @@ $$;
 --    A minimal player-vs-mob loop to drive the Current Battle panel outside
 --    of guild bosses: one enemy at a time, tracked in player_combat.
 --    get_or_spawn_player_enemy() creates/respawns the fight; strike_enemy()
---    is the "Strike" button's RPC — deal damage, take a counter-hit if the
---    enemy survives, and respawn immediately on defeat so there's always
---    something to test against. No action-point cost yet (actions still
---    aren't spent anywhere) and no real death penalty (hp just resets to
---    max) — both are TUNE spots once this becomes a real feature.
+--    is called automatically once per client idle-tick (every 8s, see
+--    app.js doTick()) rather than from a manual button — deal damage, take
+--    a counter-hit if the enemy survives, and respawn immediately on
+--    defeat so there's always something to fight. Each strike costs 1
+--    action; once actions hit 0 it returns out_of_actions instead of
+--    striking (no exception, since this fires unattended every tick).
+--    This is entirely separate from perform_idle_tick()'s passive xp/gold,
+--    which is time-based and keeps accruing offline regardless of actions
+--    — only the auto-strike loop is action-gated. No real death penalty
+--    yet (hp just resets to max) — a TUNE spot once this becomes a real
+--    feature.
 -- ----------------------------------------------------------------------------
 
 create or replace function get_or_spawn_player_enemy(p_enemy_key text default 'test_rat')
@@ -424,7 +459,9 @@ returns table (
   player_hp int,
   player_max_hp int,
   xp_gained int,
-  gold_gained int
+  gold_gained int,
+  actions_left int,
+  out_of_actions boolean
 )
 language plpgsql
 security definer
@@ -439,8 +476,10 @@ declare
   gained_xp int := 0;
   gained_gold int := 0;
   cooldown interval := interval '1 second'; -- TUNE: just enough to stop double-fires
+  action_cost int := 1; -- TUNE: actions spent per strike — one per idle-tick auto-strike
   new_player_hp int;
   new_enemy_hp int;
+  new_actions int;
 begin
   select * into p from profiles where id = auth.uid() for update;
   if not found then raise exception 'no profile'; end if;
@@ -450,8 +489,17 @@ begin
 
   pc := get_or_spawn_player_enemy(p_enemy_key);
 
+  -- this now fires automatically every idle tick (unattended), so both the
+  -- "out of actions" and "on cooldown" cases return a quiet no-op row
+  -- instead of raising — an exception every 8s would just spam the client.
+  if p.actions < action_cost then
+    return query select 0, false, pc.enemy_hp, e.max_hp, p.hp, p.max_hp, 0, 0, p.actions, true;
+    return;
+  end if;
+
   if pc.last_strike_at is not null and pc.last_strike_at + cooldown > now() then
-    raise exception 'strike is on cooldown';
+    return query select 0, false, pc.enemy_hp, e.max_hp, p.hp, p.max_hp, 0, 0, p.actions, false;
+    return;
   end if;
 
   dmg := greatest(1, p.attack);
@@ -471,10 +519,13 @@ begin
     end if;
   end if;
 
+  new_actions := p.actions - action_cost;
+
   update profiles
     set hp = new_player_hp,
         xp = xp + gained_xp,
-        gold = gold + gained_gold
+        gold = gold + gained_gold,
+        actions = new_actions
     where id = p.id;
 
   if defeated then
@@ -489,7 +540,7 @@ begin
       where profile_id = auth.uid();
   end if;
 
-  return query select dmg, defeated, new_enemy_hp, e.max_hp, new_player_hp, p.max_hp, gained_xp, gained_gold;
+  return query select dmg, defeated, new_enemy_hp, e.max_hp, new_player_hp, p.max_hp, gained_xp, gained_gold, new_actions, false;
 end;
 $$;
 
