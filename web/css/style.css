@@ -317,7 +317,39 @@ button:disabled { opacity: 0.4; cursor: not-allowed; }
 
 /* Battle panel */
 
-.boss-name { font-weight: bold; margin-bottom: 6px; }
+.battle-arena {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  margin-bottom: 14px;
+}
+.battle-side {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  flex: 1;
+  min-width: 0;
+}
+.battle-side .avatar-glyph { font-size: 2rem; }
+.enemy-glyph { color: var(--danger); text-shadow: 0 0 14px rgba(224, 82, 82, 0.55); }
+.battle-name {
+  font-weight: bold;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.battle-sub { font-size: 0.75rem; color: var(--dim); }
+.battle-vs {
+  font-family: 'Cinzel', serif;
+  font-size: 0.8rem;
+  letter-spacing: 2px;
+  color: var(--dim);
+  padding: 0 4px;
+  flex: 0 0 auto;
+}
 .hp-bar { background: #2a1f36; border-radius: 4px; height: 16px; overflow: hidden; margin: 8px 0 4px; }
 .hp-fill { background: linear-gradient(90deg, var(--danger), #ff8a5b); height: 100%; width: 100%; transition: width 0.3s; }
 #boss-hp-text { font-size: 0.8rem; color: var(--dim); margin-bottom: 8px; }

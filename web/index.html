@@ -76,11 +76,7 @@
         <li><span class="stat-label">Actions</span><span><span id="stat-actions">0</span>/<span id="stat-max-actions">0</span></span></li>
       </ul>
 
-      <div class="tick-bar"><div id="tick-bar-fill" class="tick-fill"></div></div>
-      <p id="tick-log" class="log"></p>
-
       <div class="sidebar-buttons">
-        <button id="btn-tick">Check Now</button>
         <button id="btn-refresh-actions">Refresh Actions</button>
         <button id="btn-signout" class="btn-ghost">Sign Out</button>
       </div>
@@ -89,9 +85,25 @@
     <section class="panel battle-panel" id="guild-section">
       <h2 class="panel-title">Current Battle</h2>
       <div id="boss-box">
-        <div id="boss-name" class="boss-name">—</div>
+        <div class="battle-arena">
+          <div class="battle-side battle-player">
+            <span class="avatar-glyph">☠</span>
+            <div class="battle-name" id="battle-player-name">—</div>
+            <div class="battle-sub">Lv <span id="battle-player-level">1</span></div>
+          </div>
+          <div class="battle-vs">VS</div>
+          <div class="battle-side battle-enemy">
+            <span class="avatar-glyph enemy-glyph">👹</span>
+            <div class="battle-name" id="boss-name">—</div>
+          </div>
+        </div>
+
         <div class="hp-bar"><div id="boss-hp-fill" class="hp-fill"></div></div>
         <div id="boss-hp-text"></div>
+
+        <div class="tick-bar"><div id="tick-bar-fill" class="tick-fill"></div></div>
+        <p id="tick-log" class="log"></p>
+
         <button id="btn-strike">Strike the Boss</button>
       </div>
 

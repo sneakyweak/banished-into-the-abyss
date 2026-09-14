@@ -162,6 +162,8 @@ function renderProfile() {
   if (!p) return;
   $("who").textContent = p.username;
   $("char-name").textContent = p.username;
+  $("battle-player-name").textContent = p.username;
+  $("battle-player-level").textContent = p.level;
   $("stat-depth").textContent = p.depth;
   $("stat-level").textContent = p.level;
   $("stat-xp").textContent = p.xp;
@@ -222,11 +224,6 @@ async function doTick() {
   }
   if (state.guild) refreshBoss();
 }
-
-$("btn-tick").addEventListener("click", async () => {
-  await doTick();
-  resetTickBar(); // clicking early just restarts the countdown from full
-});
 
 $("btn-refresh-actions").addEventListener("click", async () => {
   const { error } = await sb.rpc("refresh_actions");
