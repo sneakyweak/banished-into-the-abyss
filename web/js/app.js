@@ -106,7 +106,7 @@ async function enterGame(user) {
   await doTick(); // resolve any offline progress immediately
 
   clearInterval(state.tickTimer);
-  state.tickTimer = setInterval(doTick, 30_000);
+  state.tickTimer = setInterval(doTick, 8_000); // how often the client polls for idle progress while the tab is open
 }
 
 function leaveGame() {
