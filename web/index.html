@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Banished Into The Abyss</title>
+  <link rel="stylesheet" href="css/style.css" />
+</head>
+<body>
+
+  <header class="topbar">
+    <h1>Banished Into The Abyss</h1>
+    <div id="who" class="who"></div>
+  </header>
+
+  <!-- ============ AUTH SCREEN ============ -->
+  <section id="auth-screen" class="panel">
+    <div class="auth-box">
+      <h2>Enter the Abyss</h2>
+      <input id="auth-username" type="text" placeholder="character name (3-20 chars, letters/numbers/_)" autocomplete="username" />
+      <input id="auth-password" type="password" placeholder="password" autocomplete="current-password" />
+      <div class="auth-buttons">
+        <button id="btn-signin">Sign In</button>
+        <button id="btn-signup">Sign Up</button>
+      </div>
+      <p id="auth-error" class="error"></p>
+      <p class="log">No email needed — just pick a character name and password.</p>
+    </div>
+  </section>
+
+  <!-- ============ GAME SCREEN ============ -->
+  <main id="game-screen" class="hidden">
+
+    <section class="panel char-panel">
+      <h2 id="char-name">—</h2>
+      <div class="stat-grid">
+        <div>Depth <span id="stat-depth">0</span></div>
+        <div>Level <span id="stat-level">1</span></div>
+        <div>XP <span id="stat-xp">0</span></div>
+        <div>Gold <span id="stat-gold">0</span></div>
+        <div>Shards <span id="stat-shards">0</span></div>
+        <div>Attack <span id="stat-attack">0</span></div>
+      </div>
+      <button id="btn-tick">Check idle progress</button>
+      <p id="tick-log" class="log"></p>
+      <button id="btn-signout">Sign out</button>
+    </section>
+
+    <section class="panel guild-panel">
+      <h2>Guild</h2>
+      <div id="no-guild">
+        <input id="guild-name" type="text" placeholder="new guild name" />
+        <input id="guild-tag" type="text" placeholder="TAG (2-5 chars)" />
+        <button id="btn-create-guild">Found Guild</button>
+        <hr />
+        <div id="guild-list"></div>
+        <button id="btn-refresh-guilds">Refresh guild list</button>
+      </div>
+      <div id="in-guild" class="hidden">
+        <h3 id="guild-heading">—</h3>
+        <div id="boss-box">
+          <div id="boss-name">—</div>
+          <div class="hp-bar"><div id="boss-hp-fill" class="hp-fill"></div></div>
+          <div id="boss-hp-text"></div>
+          <button id="btn-strike">Strike the boss</button>
+        </div>
+        <h4>Members</h4>
+        <ul id="member-list"></ul>
+        <button id="btn-leave-guild">Leave guild</button>
+      </div>
+    </section>
+
+    <section class="panel chat-panel">
+      <div class="chat-tabs">
+        <button class="chat-tab active" data-channel="global">Global</button>
+        <button class="chat-tab" data-channel="guild">Guild</button>
+        <button class="chat-tab" data-channel="whispers">Whispers</button>
+      </div>
+      <div id="chat-log" class="chat-log"></div>
+      <form id="chat-form">
+        <input id="chat-input" type="text" maxlength="500"
+               placeholder="Say something, or /w name msg, /send name gold 10, /send name item_key 1" />
+        <button type="submit">Send</button>
+      </form>
+      <p id="chat-error" class="error"></p>
+    </section>
+
+  </main>
+
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js"></script>
+  <script src="js/config.js"></script>
+  <script src="js/app.js"></script>
+</body>
+</html>

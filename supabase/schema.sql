@@ -1,0 +1,664 @@
+-- ============================================================================
+-- Banished Into The Abyss — Supabase schema (v0)
+-- Run this once in the Supabase SQL editor on a fresh project.
+-- Idempotent-ish: safe to re-run on a project that only ever ran this file.
+-- ============================================================================
+
+-- ----------------------------------------------------------------------------
+-- 0. Extensions
+-- ----------------------------------------------------------------------------
+create extension if not exists pgcrypto;
+
+-- ----------------------------------------------------------------------------
+-- 1. Tables
+-- ----------------------------------------------------------------------------
+
+create table if not exists profiles (
+  id               uuid primary key references auth.users(id) on delete cascade,
+  username         text not null unique check (username ~ '^[A-Za-z0-9_]{3,20}$'),
+  level            int not null default 1,
+  xp               bigint not null default 0,
+  gold             bigint not null default 0,
+  shards           bigint not null default 0,     -- prestige currency
+  depth            int not null default 0,         -- prestige tier ("how deep")
+  max_hp           int not null default 100,
+  attack           int not null default 10,
+  defense          int not null default 5,
+  last_tick_at     timestamptz not null default now(),
+  last_boss_strike_at timestamptz not null default '1970-01-01',
+  last_active_at   timestamptz not null default now(),
+  created_at       timestamptz not null default now()
+);
+-- belt-and-suspenders: the auth-email trick below already prevents
+-- case-variant duplicates ("Steve" vs "steve") since both map to the same
+-- fake email, but this guards any future signup path that doesn't.
+create unique index if not exists idx_profiles_username_ci on profiles (lower(username));
+
+create table if not exists guilds (
+  id          uuid primary key default gen_random_uuid(),
+  name        text not null unique check (char_length(name) between 3 and 30),
+  tag         text not null unique check (tag ~ '^[A-Za-z0-9]{2,5}$'),
+  leader_id   uuid not null references profiles(id),
+  member_cap  int not null default 25,
+  created_at  timestamptz not null default now()
+);
+
+create table if not exists guild_members (
+  guild_id    uuid not null references guilds(id) on delete cascade,
+  profile_id  uuid not null unique references profiles(id) on delete cascade, -- one guild per player
+  role        text not null default 'member' check (role in ('leader','officer','member')),
+  joined_at   timestamptz not null default now(),
+  primary key (guild_id, profile_id)
+);
+create index if not exists idx_guild_members_guild on guild_members(guild_id);
+
+create table if not exists guild_bosses (
+  id             uuid primary key default gen_random_uuid(),
+  guild_id       uuid not null references guilds(id) on delete cascade,
+  tier           int not null default 1,
+  name           text not null,
+  max_hp         bigint not null,
+  current_hp     bigint not null,
+  spawned_at     timestamptz not null default now(),
+  defeated_at    timestamptz,
+  next_spawn_at  timestamptz
+);
+create index if not exists idx_guild_bosses_guild on guild_bosses(guild_id, spawned_at desc);
+
+create table if not exists guild_boss_damage_log (
+  id          bigint generated always as identity primary key,
+  boss_id     uuid not null references guild_bosses(id) on delete cascade,
+  profile_id  uuid not null references profiles(id) on delete cascade,
+  damage      bigint not null check (damage > 0),
+  source      text not null default 'idle' check (source in ('idle','strike')),
+  created_at  timestamptz not null default now()
+);
+create index if not exists idx_boss_damage_boss on guild_boss_damage_log(boss_id);
+create index if not exists idx_boss_damage_profile on guild_boss_damage_log(profile_id);
+
+create table if not exists items (
+  id           uuid primary key default gen_random_uuid(),
+  key          text not null unique,
+  name         text not null,
+  description  text,
+  rarity       text not null default 'common' check (rarity in ('common','uncommon','rare','epic','legendary')),
+  item_type    text not null default 'misc',
+  base_value   int not null default 0
+);
+
+create table if not exists inventory (
+  profile_id  uuid not null references profiles(id) on delete cascade,
+  item_id     uuid not null references items(id) on delete cascade,
+  quantity    int not null default 0 check (quantity >= 0),
+  primary key (profile_id, item_id)
+);
+
+create table if not exists chat_messages (
+  id          bigint generated always as identity primary key,
+  channel     text not null,          -- 'global' or 'guild:<guild-uuid>'
+  sender_id   uuid not null references profiles(id) on delete cascade,
+  body        text not null check (char_length(body) between 1 and 500),
+  created_at  timestamptz not null default now()
+);
+create index if not exists idx_chat_channel_time on chat_messages(channel, created_at desc);
+
+create table if not exists whispers (
+  id            bigint generated always as identity primary key,
+  sender_id     uuid not null references profiles(id) on delete cascade,
+  recipient_id  uuid not null references profiles(id) on delete cascade,
+  body          text not null check (char_length(body) between 1 and 500),
+  created_at    timestamptz not null default now(),
+  read_at       timestamptz
+);
+create index if not exists idx_whispers_recipient on whispers(recipient_id, created_at desc);
+
+create table if not exists item_transfers (
+  id             bigint generated always as identity primary key,
+  sender_id      uuid not null references profiles(id),
+  recipient_id   uuid not null references profiles(id),
+  item_id        uuid references items(id),
+  quantity       int,
+  gold_amount    bigint,
+  created_at     timestamptz not null default now(),
+  check (
+    (item_id is not null and quantity is not null and gold_amount is null)
+    or
+    (item_id is null and quantity is null and gold_amount is not null)
+  )
+);
+create index if not exists idx_transfers_sender_time on item_transfers(sender_id, created_at desc);
+
+-- ----------------------------------------------------------------------------
+-- 2. Row Level Security
+--    Everything a player is allowed to READ is broadly public (this is a
+--    small shared-world game — usernames, guild rosters, chat, leaderboards
+--    are all meant to be visible). Every WRITE goes through a
+--    SECURITY DEFINER function below instead of a table policy, so game
+--    rules (caps, cooldowns, validation) live in one place. That's why you
+--    won't see INSERT/UPDATE policies for normal users on most tables.
+-- ----------------------------------------------------------------------------
+
+alter table profiles enable row level security;
+alter table guilds enable row level security;
+alter table guild_members enable row level security;
+alter table guild_bosses enable row level security;
+alter table guild_boss_damage_log enable row level security;
+alter table items enable row level security;
+alter table inventory enable row level security;
+alter table chat_messages enable row level security;
+alter table whispers enable row level security;
+alter table item_transfers enable row level security;
+
+-- each policy is dropped first so this whole file can be re-run safely
+-- (unlike create table/index/function, "create policy" has no
+-- "if not exists" / "or replace" form in Postgres)
+
+drop policy if exists "profiles are publicly readable" on profiles;
+create policy "profiles are publicly readable" on profiles for select using (true);
+
+drop policy if exists "guilds are publicly readable" on guilds;
+create policy "guilds are publicly readable" on guilds for select using (true);
+
+drop policy if exists "guild rosters are publicly readable" on guild_members;
+create policy "guild rosters are publicly readable" on guild_members for select using (true);
+
+drop policy if exists "guild bosses are publicly readable" on guild_bosses;
+create policy "guild bosses are publicly readable" on guild_bosses for select using (true);
+
+drop policy if exists "boss damage log is publicly readable" on guild_boss_damage_log;
+create policy "boss damage log is publicly readable" on guild_boss_damage_log for select using (true);
+
+drop policy if exists "item catalog is publicly readable" on items;
+create policy "item catalog is publicly readable" on items for select using (true);
+
+drop policy if exists "players see only their own inventory" on inventory;
+create policy "players see only their own inventory" on inventory
+  for select using (profile_id = auth.uid());
+
+drop policy if exists "global chat is publicly readable" on chat_messages;
+create policy "global chat is publicly readable" on chat_messages
+  for select using (
+    channel = 'global'
+    or exists (
+      select 1 from guild_members gm
+      where gm.profile_id = auth.uid()
+        and channel = 'guild:' || gm.guild_id::text
+    )
+  );
+
+drop policy if exists "whispers are readable by sender or recipient" on whispers;
+create policy "whispers are readable by sender or recipient" on whispers
+  for select using (sender_id = auth.uid() or recipient_id = auth.uid());
+
+drop policy if exists "transfers are readable by sender or recipient" on item_transfers;
+create policy "transfers are readable by sender or recipient" on item_transfers
+  for select using (sender_id = auth.uid() or recipient_id = auth.uid());
+
+-- ----------------------------------------------------------------------------
+-- 3. New-user signup -> profile row
+--    Client passes the chosen username in auth signUp's options.data.username.
+--    Players never enter an email: the client (web/js/app.js) derives one
+--    from the username ("name@banished-abyss.invalid") so Supabase's normal
+--    email/password auth can be used under the hood. This REQUIRES turning
+--    off "Confirm email" in Authentication -> Settings, since no
+--    confirmation link could ever reach a .invalid address.
+-- ----------------------------------------------------------------------------
+
+create or replace function handle_new_user()
+returns trigger
+language plpgsql
+security definer
+set search_path = public
+as $$
+begin
+  insert into public.profiles (id, username)
+  values (
+    new.id,
+    coalesce(new.raw_user_meta_data->>'username', 'wanderer_' || substr(new.id::text, 1, 8))
+  );
+  return new;
+end;
+$$;
+
+drop trigger if exists on_auth_user_created on auth.users;
+create trigger on_auth_user_created
+  after insert on auth.users
+  for each row execute function handle_new_user();
+
+-- ----------------------------------------------------------------------------
+-- 4. Idle tick resolution
+--    Called by the client whenever it's convenient (page load, every few
+--    minutes while open, etc). Grants XP/gold for elapsed real time since
+--    last_tick_at, capped so offline time can't be farmed indefinitely, then
+--    feeds a slice of that XP to the player's guild boss as passive damage.
+--    Tune the constants marked TUNE once you have something playable.
+-- ----------------------------------------------------------------------------
+
+create or replace function perform_idle_tick()
+returns table (xp_gained bigint, gold_gained bigint, new_level int, boss_damage bigint)
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  p profiles%rowtype;
+  elapsed_seconds bigint;
+  max_offline_seconds bigint := 72 * 3600; -- TUNE: cap offline gains at 72h
+  xp_per_second numeric := 0.5;            -- TUNE
+  gold_per_second numeric := 0.3;          -- TUNE
+  depth_multiplier numeric;
+  gained_xp bigint;
+  gained_gold bigint;
+  lvl int;
+  my_guild_id uuid;
+  boss guild_bosses%rowtype;
+  dmg bigint := 0;
+begin
+  select * into p from profiles where id = auth.uid();
+  if not found then
+    raise exception 'no profile for current user';
+  end if;
+
+  elapsed_seconds := least(extract(epoch from (now() - p.last_tick_at))::bigint, max_offline_seconds);
+  if elapsed_seconds <= 0 then
+    return query select 0::bigint, 0::bigint, p.level, 0::bigint;
+    return;
+  end if;
+
+  depth_multiplier := 1 + (p.depth * 0.5); -- TUNE: each Depth is +50% base income
+  gained_xp := floor(elapsed_seconds * xp_per_second * depth_multiplier);
+  gained_gold := floor(elapsed_seconds * gold_per_second * depth_multiplier);
+
+  lvl := greatest(1, floor(sqrt((p.xp + gained_xp) / 100.0))::int); -- TUNE: level curve
+
+  update profiles
+    set xp = xp + gained_xp,
+        gold = gold + gained_gold,
+        level = lvl,
+        last_tick_at = now(),
+        last_active_at = now()
+    where id = p.id;
+
+  -- feed a slice of this tick's XP to the active guild boss, if any
+  select gm.guild_id into my_guild_id from guild_members gm where gm.profile_id = p.id;
+  if my_guild_id is not null then
+    boss := get_or_spawn_active_boss(my_guild_id);
+    if boss.id is not null then
+      dmg := greatest(0, floor(gained_xp * 0.2)); -- TUNE: idle contribution rate
+      if dmg > 0 then
+        perform apply_boss_damage(boss.id, p.id, dmg, 'idle');
+      end if;
+    end if;
+  end if;
+
+  return query select gained_xp, gained_gold, lvl, dmg;
+end;
+$$;
+
+-- ----------------------------------------------------------------------------
+-- 5. Guild bosses: spawn-on-read + damage application
+-- ----------------------------------------------------------------------------
+
+create or replace function get_or_spawn_active_boss(p_guild_id uuid)
+returns guild_bosses
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  boss guild_bosses%rowtype;
+  avg_depth numeric;
+  next_tier int;
+  hp bigint;
+begin
+  select * into boss
+    from guild_bosses
+    where guild_id = p_guild_id and defeated_at is null
+    order by spawned_at desc
+    limit 1;
+
+  if found then
+    return boss;
+  end if;
+
+  -- no active boss: spawn one if we're past the cooldown of the last defeated boss
+  select * into boss
+    from guild_bosses
+    where guild_id = p_guild_id
+    order by spawned_at desc
+    limit 1;
+
+  if found and boss.next_spawn_at is not null and boss.next_spawn_at > now() then
+    return boss; -- still on cooldown; caller sees defeated_at is not null and current_hp <= 0
+  end if;
+
+  select coalesce(avg(pr.depth), 0) into avg_depth
+    from guild_members gm join profiles pr on pr.id = gm.profile_id
+    where gm.guild_id = p_guild_id;
+
+  next_tier := coalesce(boss.tier, 0) + 1;
+  hp := floor(1000 * power(next_tier, 1.5) * (1 + avg_depth * 0.5)); -- TUNE
+
+  insert into guild_bosses (guild_id, tier, name, max_hp, current_hp, spawned_at)
+  values (p_guild_id, next_tier, 'Abyssal Horror, Tier ' || next_tier, hp, hp, now())
+  returning * into boss;
+
+  return boss;
+end;
+$$;
+
+create or replace function apply_boss_damage(p_boss_id uuid, p_profile_id uuid, p_damage bigint, p_source text)
+returns void
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  boss guild_bosses%rowtype;
+begin
+  select * into boss from guild_bosses where id = p_boss_id for update;
+  if not found or boss.defeated_at is not null then
+    return;
+  end if;
+
+  insert into guild_boss_damage_log (boss_id, profile_id, damage, source)
+  values (p_boss_id, p_profile_id, p_damage, p_source);
+
+  update guild_bosses
+    set current_hp = greatest(0, current_hp - p_damage)
+    where id = p_boss_id;
+
+  if boss.current_hp - p_damage <= 0 then
+    update guild_bosses
+      set defeated_at = now(),
+          next_spawn_at = now() + interval '30 minutes' -- TUNE: boss respawn cooldown
+      where id = p_boss_id;
+  end if;
+end;
+$$;
+
+create or replace function strike_active_boss()
+returns table (damage_dealt bigint, boss_defeated boolean)
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  p profiles%rowtype;
+  my_guild_id uuid;
+  boss guild_bosses%rowtype;
+  dmg bigint;
+  cooldown interval := interval '10 seconds'; -- TUNE
+begin
+  select * into p from profiles where id = auth.uid();
+  if not found then raise exception 'no profile'; end if;
+
+  if p.last_boss_strike_at + cooldown > now() then
+    raise exception 'strike is on cooldown';
+  end if;
+
+  select gm.guild_id into my_guild_id from guild_members gm where gm.profile_id = p.id;
+  if my_guild_id is null then
+    raise exception 'you are not in a guild';
+  end if;
+
+  boss := get_or_spawn_active_boss(my_guild_id);
+  if boss.id is null or boss.defeated_at is not null then
+    return query select 0::bigint, false;
+    return;
+  end if;
+
+  dmg := greatest(1, p.attack * (2 + p.depth)); -- TUNE
+  perform apply_boss_damage(boss.id, p.id, dmg, 'strike');
+  update profiles set last_boss_strike_at = now() where id = p.id;
+
+  return query select dmg, (dmg >= boss.current_hp);
+end;
+$$;
+
+-- ----------------------------------------------------------------------------
+-- 6. Guilds: create / join / leave
+-- ----------------------------------------------------------------------------
+
+create or replace function create_guild(p_name text, p_tag text)
+returns guilds
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  g guilds%rowtype;
+begin
+  if exists (select 1 from guild_members where profile_id = auth.uid()) then
+    raise exception 'you are already in a guild';
+  end if;
+
+  insert into guilds (name, tag, leader_id) values (p_name, p_tag, auth.uid())
+  returning * into g;
+
+  insert into guild_members (guild_id, profile_id, role) values (g.id, auth.uid(), 'leader');
+
+  return g;
+end;
+$$;
+
+create or replace function join_guild(p_guild_id uuid)
+returns void
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  member_count int;
+  cap int;
+begin
+  if exists (select 1 from guild_members where profile_id = auth.uid()) then
+    raise exception 'you are already in a guild';
+  end if;
+
+  select member_cap into cap from guilds where id = p_guild_id;
+  if not found then raise exception 'guild not found'; end if;
+
+  select count(*) into member_count from guild_members where guild_id = p_guild_id;
+  if member_count >= cap then
+    raise exception 'guild is full';
+  end if;
+
+  insert into guild_members (guild_id, profile_id, role) values (p_guild_id, auth.uid(), 'member');
+end;
+$$;
+
+create or replace function leave_guild()
+returns void
+language plpgsql
+security definer
+set search_path = public
+as $$
+begin
+  delete from guild_members where profile_id = auth.uid();
+end;
+$$;
+
+-- ----------------------------------------------------------------------------
+-- 7. Chat & whispers
+-- ----------------------------------------------------------------------------
+
+create or replace function post_chat_message(p_channel text, p_body text)
+returns chat_messages
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  msg chat_messages%rowtype;
+  last_msg_at timestamptz;
+  min_gap interval := interval '2 seconds'; -- TUNE: per-user chat rate limit
+begin
+  if p_channel <> 'global' then
+    if not exists (
+      select 1 from guild_members
+      where profile_id = auth.uid() and 'guild:' || guild_id::text = p_channel
+    ) then
+      raise exception 'not a member of that guild channel';
+    end if;
+  end if;
+
+  select max(created_at) into last_msg_at
+    from chat_messages where sender_id = auth.uid() and channel = p_channel;
+  if last_msg_at is not null and last_msg_at + min_gap > now() then
+    raise exception 'you are sending messages too fast';
+  end if;
+
+  insert into chat_messages (channel, sender_id, body) values (p_channel, auth.uid(), p_body)
+  returning * into msg;
+
+  return msg;
+end;
+$$;
+
+create or replace function send_whisper(p_recipient_username text, p_body text)
+returns whispers
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  recipient_id uuid;
+  w whispers%rowtype;
+begin
+  select id into recipient_id from profiles where lower(username) = lower(p_recipient_username);
+  if not found then raise exception 'no such player'; end if;
+  if recipient_id = auth.uid() then raise exception 'cannot whisper yourself'; end if;
+
+  insert into whispers (sender_id, recipient_id, body) values (auth.uid(), recipient_id, p_body)
+  returning * into w;
+
+  return w;
+end;
+$$;
+
+-- ----------------------------------------------------------------------------
+-- 8. /send — gold and items, with logging, cooldown and daily caps
+-- ----------------------------------------------------------------------------
+
+create or replace function send_gold(p_recipient_username text, p_amount bigint)
+returns void
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  recipient_id uuid;
+  sender_gold bigint;
+  cooldown interval := interval '5 seconds';   -- TUNE
+  daily_cap bigint := 1000000;                 -- TUNE
+  sent_today bigint;
+  last_transfer_at timestamptz;
+begin
+  if p_amount <= 0 then raise exception 'amount must be positive'; end if;
+
+  select id into recipient_id from profiles where lower(username) = lower(p_recipient_username);
+  if not found then raise exception 'no such player'; end if;
+  if recipient_id = auth.uid() then raise exception 'cannot send to yourself'; end if;
+
+  select max(created_at) into last_transfer_at from item_transfers where sender_id = auth.uid();
+  if last_transfer_at is not null and last_transfer_at + cooldown > now() then
+    raise exception 'sending too fast, slow down';
+  end if;
+
+  select coalesce(sum(gold_amount), 0) into sent_today
+    from item_transfers
+    where sender_id = auth.uid() and gold_amount is not null and created_at > now() - interval '24 hours';
+  if sent_today + p_amount > daily_cap then
+    raise exception 'daily send limit reached';
+  end if;
+
+  select gold into sender_gold from profiles where id = auth.uid() for update;
+  if sender_gold < p_amount then raise exception 'not enough gold'; end if;
+
+  update profiles set gold = gold - p_amount where id = auth.uid();
+  update profiles set gold = gold + p_amount where id = recipient_id;
+
+  insert into item_transfers (sender_id, recipient_id, gold_amount) values (auth.uid(), recipient_id, p_amount);
+end;
+$$;
+
+create or replace function send_item(p_recipient_username text, p_item_key text, p_quantity int)
+returns void
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  recipient_id uuid;
+  target_item_id uuid;
+  have_qty int;
+  cooldown interval := interval '5 seconds'; -- TUNE
+  last_transfer_at timestamptz;
+begin
+  if p_quantity <= 0 then raise exception 'quantity must be positive'; end if;
+
+  select id into recipient_id from profiles where lower(username) = lower(p_recipient_username);
+  if not found then raise exception 'no such player'; end if;
+  if recipient_id = auth.uid() then raise exception 'cannot send to yourself'; end if;
+
+  select id into target_item_id from items where key = p_item_key;
+  if not found then raise exception 'no such item'; end if;
+
+  select max(created_at) into last_transfer_at from item_transfers where sender_id = auth.uid();
+  if last_transfer_at is not null and last_transfer_at + cooldown > now() then
+    raise exception 'sending too fast, slow down';
+  end if;
+
+  select quantity into have_qty from inventory where profile_id = auth.uid() and item_id = target_item_id for update;
+  if have_qty is null or have_qty < p_quantity then raise exception 'not enough of that item'; end if;
+
+  update inventory set quantity = quantity - p_quantity where profile_id = auth.uid() and item_id = target_item_id;
+
+  insert into inventory (profile_id, item_id, quantity) values (recipient_id, target_item_id, p_quantity)
+    on conflict (profile_id, item_id) do update set quantity = inventory.quantity + excluded.quantity;
+
+  insert into item_transfers (sender_id, recipient_id, item_id, quantity)
+    values (auth.uid(), recipient_id, target_item_id, p_quantity);
+end;
+$$;
+
+-- ----------------------------------------------------------------------------
+-- 9. Realtime: expose chat, whispers and boss HP to Supabase Realtime
+-- ----------------------------------------------------------------------------
+
+-- "alter publication ... add table" errors if the table is already a
+-- member, so guard each one (also needed for re-running this file safely)
+do $$
+begin
+  if not exists (
+    select 1 from pg_publication_tables
+    where pubname = 'supabase_realtime' and schemaname = 'public' and tablename = 'chat_messages'
+  ) then
+    alter publication supabase_realtime add table chat_messages;
+  end if;
+
+  if not exists (
+    select 1 from pg_publication_tables
+    where pubname = 'supabase_realtime' and schemaname = 'public' and tablename = 'whispers'
+  ) then
+    alter publication supabase_realtime add table whispers;
+  end if;
+
+  if not exists (
+    select 1 from pg_publication_tables
+    where pubname = 'supabase_realtime' and schemaname = 'public' and tablename = 'guild_bosses'
+  ) then
+    alter publication supabase_realtime add table guild_bosses;
+  end if;
+end $$;
+
+-- ----------------------------------------------------------------------------
+-- 10. Seed a few starter items so /send has something to test with
+-- ----------------------------------------------------------------------------
+
+insert into items (key, name, description, rarity, item_type, base_value) values
+  ('rusty_shard',   'Rusty Abyssal Shard Fragment', 'A dull fragment. Barely worth anything, but it''s something.', 'common', 'material', 1),
+  ('torchstone',    'Torchstone',                   'Glows faintly even in the deepest dark.', 'uncommon', 'material', 10),
+  ('echo_charm',    'Echo Charm',                    'Hums with a voice that isn''t yours.', 'rare', 'trinket', 50)
+on conflict (key) do nothing;
