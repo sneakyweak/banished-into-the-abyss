@@ -75,7 +75,7 @@
 
     <nav class="page-nav">
       <span class="page-pill active">World</span>
-      <a href="#guild-section" class="page-pill active">Guild</a>
+      <button type="button" id="nav-guild-btn" class="page-pill active">Guild</button>
       <span class="page-pill active">Character</span>
       <span class="page-pill soon">Party<i>soon</i></span>
       <span class="page-pill soon">Trade<i>soon</i></span>
@@ -85,7 +85,6 @@
     <aside class="panel sidebar">
       <div class="avatar-box">
         <img id="avatar-portrait" class="avatar-portrait" src="img/class-warrior-avatar.jpg" alt="" />
-        <span id="avatar-label" class="avatar-label">Wanderer</span>
       </div>
       <h2 id="char-name">—</h2>
       <ul class="stat-list">
@@ -104,60 +103,30 @@
       </div>
     </aside>
 
-    <section class="panel battle-panel" id="guild-section">
+    <section class="panel battle-panel">
       <h2 class="panel-title">Current Battle</h2>
-      <div id="boss-box">
-        <div class="battle-arena">
-          <div class="battle-side battle-player">
-            <img id="battle-player-portrait" class="battle-portrait" src="img/class-warrior-avatar.jpg" alt="" />
-            <div class="battle-name" id="battle-player-name">—</div>
-            <div class="battle-sub">Lv <span id="battle-player-level">1</span></div>
-            <div class="hp-bar"><div id="player-hp-fill" class="hp-fill hp-fill-player"></div></div>
-            <div id="player-hp-text" class="battle-hp-text"></div>
-          </div>
-          <div class="battle-vs">VS</div>
-          <div class="battle-side battle-enemy">
-            <span class="avatar-glyph enemy-glyph">🐀</span>
-            <div class="battle-name" id="enemy-name">—</div>
-            <div class="battle-sub">&nbsp;</div>
-            <div class="hp-bar"><div id="enemy-hp-fill" class="hp-fill"></div></div>
-            <div id="enemy-hp-text" class="battle-hp-text"></div>
-          </div>
+      <div class="battle-arena">
+        <div class="battle-side battle-player">
+          <img id="battle-player-portrait" class="battle-portrait" src="img/class-warrior-avatar.jpg" alt="" />
+          <div class="battle-name" id="battle-player-name">—</div>
+          <div class="battle-sub">Lv <span id="battle-player-level">1</span></div>
+          <div class="hp-bar"><div id="player-hp-fill" class="hp-fill hp-fill-player"></div></div>
+          <div id="player-hp-text" class="battle-hp-text"></div>
         </div>
-
-        <div class="tick-bar"><div id="tick-bar-fill" class="tick-fill"></div></div>
-        <p id="tick-log" class="log"></p>
-
-        <button id="btn-strike-enemy">Strike</button>
+        <div class="battle-vs">VS</div>
+        <div class="battle-side battle-enemy">
+          <span class="avatar-glyph enemy-glyph">🐀</span>
+          <div class="battle-name" id="enemy-name">—</div>
+          <div class="battle-sub">&nbsp;</div>
+          <div class="hp-bar"><div id="enemy-hp-fill" class="hp-fill"></div></div>
+          <div id="enemy-hp-text" class="battle-hp-text"></div>
+        </div>
       </div>
 
-      <div class="panel-divider"></div>
+      <div class="tick-bar"><div id="tick-bar-fill" class="tick-fill"></div></div>
+      <p id="tick-log" class="log"></p>
 
-      <h3 class="panel-subtitle">Guild Boss</h3>
-      <div id="boss-box">
-        <div id="boss-name" class="boss-name">—</div>
-        <div class="hp-bar"><div id="boss-hp-fill" class="hp-fill"></div></div>
-        <div id="boss-hp-text"></div>
-        <button id="btn-strike">Strike the Boss</button>
-      </div>
-
-      <div class="panel-divider"></div>
-
-      <h3 class="panel-subtitle">Guild</h3>
-      <div id="no-guild">
-        <input id="guild-name" type="text" placeholder="new guild name" />
-        <input id="guild-tag" type="text" placeholder="TAG (2-5 chars)" />
-        <button id="btn-create-guild">Found Guild</button>
-        <hr />
-        <div id="guild-list"></div>
-        <button id="btn-refresh-guilds">Refresh guild list</button>
-      </div>
-      <div id="in-guild" class="hidden">
-        <h4 id="guild-heading">—</h4>
-        <p class="log">Members</p>
-        <ul id="member-list"></ul>
-        <button id="btn-leave-guild" class="btn-ghost">Leave guild</button>
-      </div>
+      <button id="btn-strike-enemy">Strike</button>
     </section>
 
     <section class="panel chat-panel">
@@ -199,6 +168,39 @@
     </section>
 
   </main>
+
+  <!-- ============ GUILD OVERLAY ============ -->
+  <div id="guild-overlay" class="overlay hidden">
+    <div class="panel overlay-panel">
+      <button type="button" id="btn-close-guild-overlay" class="overlay-close" aria-label="Close">&times;</button>
+      <h2 class="panel-title">Guild</h2>
+
+      <h3 class="panel-subtitle">Guild Boss</h3>
+      <div id="boss-status">
+        <div id="boss-name" class="boss-name">—</div>
+        <div class="hp-bar"><div id="boss-hp-fill" class="hp-fill"></div></div>
+        <div id="boss-hp-text"></div>
+        <p class="log">Fed automatically by your idle progress — no manual strike needed.</p>
+      </div>
+
+      <div class="panel-divider"></div>
+
+      <div id="no-guild">
+        <input id="guild-name" type="text" placeholder="new guild name" />
+        <input id="guild-tag" type="text" placeholder="TAG (2-5 chars)" />
+        <button id="btn-create-guild">Found Guild</button>
+        <hr />
+        <div id="guild-list"></div>
+        <button id="btn-refresh-guilds">Refresh guild list</button>
+      </div>
+      <div id="in-guild" class="hidden">
+        <h4 id="guild-heading">—</h4>
+        <p class="log">Members</p>
+        <ul id="member-list"></ul>
+        <button id="btn-leave-guild" class="btn-ghost">Leave guild</button>
+      </div>
+    </div>
+  </div>
 
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js"></script>
   <script src="js/config.js"></script>

@@ -191,7 +191,6 @@ function renderProfile() {
   const className = p.class ? p.class.charAt(0).toUpperCase() + p.class.slice(1) : "Wanderer";
   $("avatar-portrait").src = portraitSrc;
   $("avatar-portrait").alt = className;
-  $("avatar-label").textContent = className;
   $("battle-player-portrait").src = portraitSrc;
   $("battle-player-portrait").alt = className;
 
@@ -309,7 +308,21 @@ $("btn-refresh-actions").addEventListener("click", async () => {
 
 // ---------------------------------------------------------------------------
 // Guild
+//    Guild management (create/join/leave, members, boss status) lives in an
+//    overlay now instead of on the main page — opened from the "Guild" nav
+//    pill. The guild boss no longer has a manual strike button; it's fed
+//    purely by idle-tick damage (see perform_idle_tick in schema.sql).
 // ---------------------------------------------------------------------------
+
+$("nav-guild-btn").addEventListener("click", () => {
+  $("guild-overlay").classList.remove("hidden");
+});
+$("btn-close-guild-overlay").addEventListener("click", () => {
+  $("guild-overlay").classList.add("hidden");
+});
+$("guild-overlay").addEventListener("click", (e) => {
+  if (e.target.id === "guild-overlay") $("guild-overlay").classList.add("hidden"); // click on backdrop closes it
+});
 
 async function loadGuildMembership() {
   const { data: membership } = await sb
@@ -419,17 +432,6 @@ function renderBoss() {
   $("boss-hp-text").textContent = `${b.current_hp} / ${b.max_hp} HP`;
 }
 
-$("btn-strike").addEventListener("click", async () => {
-  const { data, error } = await sb.rpc("strike_active_boss");
-  if (error) return alert(error.message);
-  const row = data?.[0];
-  if (row) {
-    $("tick-log").textContent = row.boss_defeated
-      ? `You landed the killing blow for ${row.damage_dealt} damage!`
-      : `You struck the boss for ${row.damage_dealt} damage.`;
-  }
-  await refreshBoss();
-});
 
 function subscribeBoss() {
   if (state.bossSub) sb.removeChannel(state.bossSub);

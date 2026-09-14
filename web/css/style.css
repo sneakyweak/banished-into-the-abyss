@@ -320,6 +320,46 @@ button:disabled { opacity: 0.4; cursor: not-allowed; }
 .page-nav-note { margin-left: auto; font-size: 0.7rem; color: var(--dim); opacity: 0.7; }
 
 /* ---------------------------------------------------------------------- */
+/* Guild overlay                                                           */
+/* ---------------------------------------------------------------------- */
+
+.overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(5, 3, 8, 0.78);
+  backdrop-filter: blur(3px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+  z-index: 100;
+}
+.overlay-panel {
+  position: relative;
+  width: 100%;
+  max-width: 480px;
+  max-height: 85vh;
+  overflow-y: auto;
+  margin: 0;
+}
+.overlay-close {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--dim);
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  border-radius: 6px;
+  font-size: 1.1rem;
+  line-height: 1;
+  cursor: pointer;
+}
+.overlay-close:hover { border-color: var(--accent); color: var(--text); }
+
+/* ---------------------------------------------------------------------- */
 /* Game layout                                                             */
 /* ---------------------------------------------------------------------- */
 
@@ -367,7 +407,6 @@ button:disabled { opacity: 0.4; cursor: not-allowed; }
   background: rgba(139, 92, 246, 0.05);
 }
 .avatar-glyph { font-size: 2.4rem; color: var(--accent-bright); text-shadow: 0 0 14px rgba(168, 85, 247, 0.6); }
-.avatar-label { font-size: 0.7rem; letter-spacing: 2px; text-transform: uppercase; color: var(--dim); }
 
 .stat-list { list-style: none; margin: 12px 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
 .stat-list li { display: flex; justify-content: space-between; font-size: 0.85rem; border-bottom: 1px dotted var(--border); padding-bottom: 4px; }
