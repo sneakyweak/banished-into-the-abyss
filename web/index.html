@@ -4,19 +4,39 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Banished Into The Abyss</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Cinzel:wght@500;700;900&display=swap" rel="stylesheet" />
   <link rel="stylesheet" href="css/style.css" />
 </head>
 <body>
 
+  <div class="void-bg" aria-hidden="true"></div>
+
   <header class="topbar">
-    <h1>Banished Into The Abyss</h1>
+    <div class="brand-compact">
+      <span class="brand-compact-line">Banished Into The</span>
+      <span class="brand-compact-abyss">Abyss</span>
+    </div>
     <div id="who" class="who"></div>
   </header>
 
   <!-- ============ AUTH SCREEN ============ -->
   <section id="auth-screen" class="panel">
+    <div class="hero-title" aria-label="Banished Into The Abyss">
+      <div class="hero-line hero-banished">Banished</div>
+      <div class="hero-line hero-into">Into</div>
+      <div class="hero-line hero-the">The</div>
+      <div class="hero-abyss">
+        <span class="smoke-puff s1" aria-hidden="true"></span>
+        <span class="smoke-puff s2" aria-hidden="true"></span>
+        <span class="smoke-puff s3" aria-hidden="true"></span>
+        <span class="smoke-puff s4" aria-hidden="true"></span>
+        <span class="hero-abyss-text">Abyss</span>
+      </div>
+    </div>
+
     <div class="auth-box">
-      <h2>Enter the Abyss</h2>
       <input id="auth-username" type="text" placeholder="character name (3-20 chars, letters/numbers/_)" autocomplete="username" />
       <input id="auth-password" type="password" placeholder="password" autocomplete="current-password" />
       <div class="auth-buttons">
@@ -31,24 +51,53 @@
   <!-- ============ GAME SCREEN ============ -->
   <main id="game-screen" class="hidden">
 
-    <section class="panel char-panel">
-      <h2 id="char-name">—</h2>
-      <div class="stat-grid">
-        <div>Depth <span id="stat-depth">0</span></div>
-        <div>Level <span id="stat-level">1</span></div>
-        <div>XP <span id="stat-xp">0</span></div>
-        <div>Gold <span id="stat-gold">0</span></div>
-        <div>Shards <span id="stat-shards">0</span></div>
-        <div>Attack <span id="stat-attack">0</span></div>
+    <nav class="page-nav">
+      <span class="page-pill active">World</span>
+      <a href="#guild-section" class="page-pill active">Guild</a>
+      <span class="page-pill active">Character</span>
+      <span class="page-pill soon">Party<i>soon</i></span>
+      <span class="page-pill soon">Trade<i>soon</i></span>
+      <span class="page-nav-note">more pages arrive here as they're built</span>
+    </nav>
+
+    <aside class="panel sidebar">
+      <div class="avatar-box">
+        <span class="avatar-glyph">☠</span>
+        <span class="avatar-label">Wanderer</span>
       </div>
+      <h2 id="char-name">—</h2>
+      <ul class="stat-list">
+        <li><span class="stat-label">Depth</span><span id="stat-depth">0</span></li>
+        <li><span class="stat-label">Level</span><span id="stat-level">1</span></li>
+        <li><span class="stat-label">Experience</span><span id="stat-xp">0</span></li>
+        <li><span class="stat-label">Gold</span><span id="stat-gold">0</span></li>
+        <li><span class="stat-label">Abyssal Shards</span><span id="stat-shards">0</span></li>
+        <li><span class="stat-label">Attack</span><span id="stat-attack">0</span></li>
+        <li><span class="stat-label">Actions</span><span><span id="stat-actions">0</span>/<span id="stat-max-actions">0</span></span></li>
+      </ul>
+
       <div class="tick-bar"><div id="tick-bar-fill" class="tick-fill"></div></div>
       <p id="tick-log" class="log"></p>
-      <button id="btn-tick">Check now</button>
-      <button id="btn-signout">Sign out</button>
-    </section>
 
-    <section class="panel guild-panel">
-      <h2>Guild</h2>
+      <div class="sidebar-buttons">
+        <button id="btn-tick">Check Now</button>
+        <button id="btn-refresh-actions">Refresh Actions</button>
+        <button id="btn-signout" class="btn-ghost">Sign Out</button>
+      </div>
+    </aside>
+
+    <section class="panel battle-panel" id="guild-section">
+      <h2 class="panel-title">Current Battle</h2>
+      <div id="boss-box">
+        <div id="boss-name" class="boss-name">—</div>
+        <div class="hp-bar"><div id="boss-hp-fill" class="hp-fill"></div></div>
+        <div id="boss-hp-text"></div>
+        <button id="btn-strike">Strike the Boss</button>
+      </div>
+
+      <div class="panel-divider"></div>
+
+      <h3 class="panel-subtitle">Guild</h3>
       <div id="no-guild">
         <input id="guild-name" type="text" placeholder="new guild name" />
         <input id="guild-tag" type="text" placeholder="TAG (2-5 chars)" />
@@ -58,24 +107,21 @@
         <button id="btn-refresh-guilds">Refresh guild list</button>
       </div>
       <div id="in-guild" class="hidden">
-        <h3 id="guild-heading">—</h3>
-        <div id="boss-box">
-          <div id="boss-name">—</div>
-          <div class="hp-bar"><div id="boss-hp-fill" class="hp-fill"></div></div>
-          <div id="boss-hp-text"></div>
-          <button id="btn-strike">Strike the boss</button>
-        </div>
-        <h4>Members</h4>
+        <h4 id="guild-heading">—</h4>
+        <p class="log">Members</p>
         <ul id="member-list"></ul>
-        <button id="btn-leave-guild">Leave guild</button>
+        <button id="btn-leave-guild" class="btn-ghost">Leave guild</button>
       </div>
     </section>
 
     <section class="panel chat-panel">
       <div class="chat-tabs">
-        <button class="chat-tab active" data-channel="global">Global</button>
+        <button class="chat-tab active" data-channel="global">World</button>
         <button class="chat-tab" data-channel="guild">Guild</button>
         <button class="chat-tab" data-channel="whispers">Whispers</button>
+        <span class="chat-tab-soon">Party<i>soon</i></span>
+        <span class="chat-tab-soon">Trade<i>soon</i></span>
+        <span class="chat-tab-soon">Logs<i>soon</i></span>
       </div>
       <div id="chat-log" class="chat-log"></div>
       <form id="chat-form">
@@ -84,6 +130,26 @@
         <button type="submit">Send</button>
       </form>
       <p id="chat-error" class="error"></p>
+    </section>
+
+    <section class="panel equipment-panel">
+      <h2 class="panel-title">Equipment</h2>
+      <p class="log">Not wired up yet — gear will land here once crafting/drops exist.</p>
+      <div class="equip-grid">
+        <div class="equip-slot"><span class="equip-slot-label">Helm</span></div>
+        <div class="equip-slot"><span class="equip-slot-label">Garb</span></div>
+        <div class="equip-slot"><span class="equip-slot-label">Ring</span></div>
+        <div class="equip-slot"><span class="equip-slot-label">Ring</span></div>
+        <div class="equip-slot"><span class="equip-slot-label">Relic</span></div>
+        <div class="equip-slot"><span class="equip-slot-label">Relic</span></div>
+      </div>
+    </section>
+
+    <section class="panel inventory-panel">
+      <h2 class="panel-title">Inventory</h2>
+      <ul id="inventory-list" class="inventory-list">
+        <li class="log">Empty.</li>
+      </ul>
     </section>
 
   </main>

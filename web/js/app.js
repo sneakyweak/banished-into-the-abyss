@@ -21,15 +21,21 @@ const $ = (id) => document.getElementById(id);
 const TICK_INTERVAL_MS = 8_000; // how often idle progress checks in automatically
 
 // drains the action-bar-style tick tracker over TICK_INTERVAL_MS using a
-// plain CSS transition, rather than driving it frame-by-frame from JS
+// plain CSS transition, rather than driving it frame-by-frame from JS.
+// Uses a double rAF (rather than an offsetWidth read) to force the browser
+// to paint the "full, no transition" state before starting the animated
+// "empty" state — the more reliable way to force that split across browsers.
 function resetTickBar() {
   const fill = $("tick-bar-fill");
   if (!fill) return;
   fill.style.transition = "none";
   fill.style.width = "100%";
-  void fill.offsetWidth; // force a reflow so the next transition actually animates
-  fill.style.transition = `width ${TICK_INTERVAL_MS}ms linear`;
-  fill.style.width = "0%";
+  requestAnimationFrame(() => {
+    requestAnimationFrame(() => {
+      fill.style.transition = `width ${TICK_INTERVAL_MS}ms linear`;
+      fill.style.width = "0%";
+    });
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -114,6 +120,7 @@ async function enterGame(user) {
 
   await loadProfile();
   await loadGuildMembership();
+  await loadInventory();
   await loadChatHistory("global");
   subscribeChat("global");
   subscribeWhispers();
@@ -161,6 +168,46 @@ function renderProfile() {
   $("stat-gold").textContent = p.gold;
   $("stat-shards").textContent = p.shards;
   $("stat-attack").textContent = p.attack;
+  $("stat-actions").textContent = p.actions;
+  $("stat-max-actions").textContent = p.max_actions;
+}
+
+async function loadInventory() {
+  const { data, error } = await sb
+    .from("inventory")
+    .select("quantity, items(key, name, description, rarity)")
+    .eq("profile_id", state.user.id)
+    .gt("quantity", 0)
+    .order("quantity", { ascending: false });
+  if (error) return console.error(error);
+  renderInventory(data || []);
+}
+
+function renderInventory(rows) {
+  const ul = $("inventory-list");
+  ul.innerHTML = "";
+  if (!rows.length) {
+    const li = document.createElement("li");
+    li.className = "log";
+    li.textContent = "Empty.";
+    ul.appendChild(li);
+    return;
+  }
+  rows.forEach((row) => {
+    const item = row.items;
+    if (!item) return;
+    const li = document.createElement("li");
+    li.title = item.description || "";
+    const name = document.createElement("span");
+    name.className = `rarity-${item.rarity}`;
+    name.textContent = item.name;
+    const qty = document.createElement("span");
+    qty.className = "item-qty";
+    qty.textContent = `x${row.quantity}`;
+    li.appendChild(name);
+    li.appendChild(qty);
+    ul.appendChild(li);
+  });
 }
 
 async function doTick() {
@@ -179,6 +226,12 @@ async function doTick() {
 $("btn-tick").addEventListener("click", async () => {
   await doTick();
   resetTickBar(); // clicking early just restarts the countdown from full
+});
+
+$("btn-refresh-actions").addEventListener("click", async () => {
+  const { error } = await sb.rpc("refresh_actions");
+  if (error) return alert(error.message);
+  await loadProfile();
 });
 
 // ---------------------------------------------------------------------------
@@ -446,6 +499,7 @@ $("chat-form").addEventListener("submit", async (e) => {
       }
       appendChatLine("system", `Sent ${amount} ${thing} to ${name}.`, "system");
       await loadProfile();
+      await loadInventory();
     } else {
       const channel = currentChannelName();
       const { error } = await sb.rpc("post_chat_message", { p_channel: channel, p_body: text });
