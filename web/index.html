@@ -36,6 +36,28 @@
       </div>
     </div>
 
+    <div class="class-picker">
+      <h3 class="panel-subtitle">Choose Your Class <span class="log">(new characters only)</span></h3>
+      <div class="class-grid" id="class-grid">
+        <button type="button" class="class-card" data-class="warrior">
+          <img src="img/class-warrior-full.jpg" alt="Warrior" />
+          <span class="class-name">Warrior</span>
+        </button>
+        <button type="button" class="class-card" data-class="archer">
+          <img src="img/class-archer-full.jpg" alt="Archer" />
+          <span class="class-name">Archer</span>
+        </button>
+        <button type="button" class="class-card" data-class="magi">
+          <img src="img/class-magi-full.jpg" alt="Magi" />
+          <span class="class-name">Magi</span>
+        </button>
+        <button type="button" class="class-card" data-class="striker">
+          <img src="img/class-striker-full.jpg" alt="Striker" />
+          <span class="class-name">Striker</span>
+        </button>
+      </div>
+    </div>
+
     <div class="auth-box">
       <input id="auth-username" type="text" placeholder="character name (3-20 chars, letters/numbers/_)" autocomplete="username" />
       <input id="auth-password" type="password" placeholder="password" autocomplete="current-password" />
@@ -62,8 +84,8 @@
 
     <aside class="panel sidebar">
       <div class="avatar-box">
-        <span class="avatar-glyph">☠</span>
-        <span class="avatar-label">Wanderer</span>
+        <img id="avatar-portrait" class="avatar-portrait" src="img/class-warrior-avatar.jpg" alt="" />
+        <span id="avatar-label" class="avatar-label">Wanderer</span>
       </div>
       <h2 id="char-name">—</h2>
       <ul class="stat-list">
@@ -87,23 +109,35 @@
       <div id="boss-box">
         <div class="battle-arena">
           <div class="battle-side battle-player">
-            <span class="avatar-glyph">☠</span>
+            <img id="battle-player-portrait" class="battle-portrait" src="img/class-warrior-avatar.jpg" alt="" />
             <div class="battle-name" id="battle-player-name">—</div>
             <div class="battle-sub">Lv <span id="battle-player-level">1</span></div>
+            <div class="hp-bar"><div id="player-hp-fill" class="hp-fill hp-fill-player"></div></div>
+            <div id="player-hp-text" class="battle-hp-text"></div>
           </div>
           <div class="battle-vs">VS</div>
           <div class="battle-side battle-enemy">
-            <span class="avatar-glyph enemy-glyph">👹</span>
-            <div class="battle-name" id="boss-name">—</div>
+            <span class="avatar-glyph enemy-glyph">🐀</span>
+            <div class="battle-name" id="enemy-name">—</div>
+            <div class="battle-sub">&nbsp;</div>
+            <div class="hp-bar"><div id="enemy-hp-fill" class="hp-fill"></div></div>
+            <div id="enemy-hp-text" class="battle-hp-text"></div>
           </div>
         </div>
-
-        <div class="hp-bar"><div id="boss-hp-fill" class="hp-fill"></div></div>
-        <div id="boss-hp-text"></div>
 
         <div class="tick-bar"><div id="tick-bar-fill" class="tick-fill"></div></div>
         <p id="tick-log" class="log"></p>
 
+        <button id="btn-strike-enemy">Strike</button>
+      </div>
+
+      <div class="panel-divider"></div>
+
+      <h3 class="panel-subtitle">Guild Boss</h3>
+      <div id="boss-box">
+        <div id="boss-name" class="boss-name">—</div>
+        <div class="hp-bar"><div id="boss-hp-fill" class="hp-fill"></div></div>
+        <div id="boss-hp-text"></div>
         <button id="btn-strike">Strike the Boss</button>
       </div>
 

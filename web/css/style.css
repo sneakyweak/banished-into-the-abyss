@@ -185,6 +185,67 @@ body {
   background: linear-gradient(90deg, transparent, var(--border) 20%, var(--border) 80%, transparent);
 }
 
+.class-picker { max-width: 640px; margin: 0 auto 24px; text-align: center; }
+.class-picker .panel-subtitle { justify-content: center; }
+.class-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 10px;
+  margin-top: 10px;
+}
+.class-card {
+  background: linear-gradient(180deg, var(--panel) 0%, #130f1a 100%);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 6px;
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  color: var(--text);
+  font-family: inherit;
+}
+.class-card img {
+  width: 100%;
+  aspect-ratio: 3 / 4;
+  object-fit: cover;
+  border-radius: 5px;
+  display: block;
+}
+.class-card .class-name {
+  font-size: 0.75rem;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+  color: var(--dim);
+}
+.class-card:hover { border-color: var(--accent); }
+.class-card.selected {
+  border-color: var(--accent-bright);
+  box-shadow: 0 0 0 1px var(--accent-bright), 0 0 16px rgba(192, 132, 252, 0.5);
+}
+.class-card.selected .class-name { color: var(--accent-bright); font-weight: bold; }
+@media (max-width: 560px) {
+  .class-grid { grid-template-columns: repeat(2, 1fr); }
+}
+
+.avatar-portrait {
+  width: 96px;
+  height: 96px;
+  object-fit: cover;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  box-shadow: 0 0 14px rgba(168, 85, 247, 0.25);
+}
+
+.battle-portrait {
+  width: 64px;
+  height: 64px;
+  object-fit: cover;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+}
+
 .auth-box { max-width: 340px; margin: 0 auto 40px; display: flex; flex-direction: column; gap: 8px; }
 .auth-box input {
   background: #0c0a10; border: 1px solid var(--border); color: var(--text);
@@ -350,9 +411,13 @@ button:disabled { opacity: 0.4; cursor: not-allowed; }
   padding: 0 4px;
   flex: 0 0 auto;
 }
+.battle-side .hp-bar { width: 100%; }
+.battle-hp-text { font-size: 0.75rem; color: var(--dim); }
 .hp-bar { background: #2a1f36; border-radius: 4px; height: 16px; overflow: hidden; margin: 8px 0 4px; }
 .hp-fill { background: linear-gradient(90deg, var(--danger), #ff8a5b); height: 100%; width: 100%; transition: width 0.3s; }
+.hp-fill-player { background: linear-gradient(90deg, var(--good), #7fe0a0); }
 #boss-hp-text { font-size: 0.8rem; color: var(--dim); margin-bottom: 8px; }
+.boss-name { font-weight: bold; margin-bottom: 6px; }
 
 #member-list { list-style: none; padding: 0; margin: 0 0 10px; font-size: 0.85rem; color: var(--dim); }
 #member-list li { padding: 2px 0; }

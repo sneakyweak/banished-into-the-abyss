@@ -21,6 +21,7 @@ create table if not exists profiles (
   gold             bigint not null default 0,
   shards           bigint not null default 0,     -- prestige currency
   depth            int not null default 0,         -- prestige tier ("how deep")
+  hp               int not null default 100,        -- current hp (solo combat)
   max_hp           int not null default 100,
   attack           int not null default 10,
   defense          int not null default 5,
@@ -41,6 +42,7 @@ create unique index if not exists idx_profiles_username_ci on profiles (lower(us
 -- if they're already there.
 alter table profiles add column if not exists actions int not null default 3000;
 alter table profiles add column if not exists max_actions int not null default 3000;
+alter table profiles add column if not exists hp int not null default 100;
 
 create table if not exists guilds (
   id          uuid primary key default gen_random_uuid(),
@@ -101,6 +103,28 @@ create table if not exists inventory (
   primary key (profile_id, item_id)
 );
 
+-- solo enemies: a small standalone catalog for testing the combat panel
+-- (separate from guild_bosses, which are per-guild and idle-fed). A player
+-- fights one enemy at a time; player_combat tracks that enemy's current hp.
+create table if not exists enemies (
+  key          text primary key,
+  name         text not null,
+  max_hp       int not null,
+  attack       int not null default 1,
+  xp_reward    int not null default 0,
+  gold_reward  int not null default 0
+);
+
+create table if not exists player_combat (
+  profile_id     uuid primary key references profiles(id) on delete cascade,
+  enemy_key      text not null references enemies(key),
+  enemy_hp       int not null,
+  updated_at     timestamptz not null default now(),
+  last_strike_at timestamptz -- null until the player's first real strike; kept
+                              -- separate from updated_at so spawning/respawning
+                              -- an enemy never itself looks like a recent strike
+);
+
 create table if not exists chat_messages (
   id          bigint generated always as identity primary key,
   channel     text not null,          -- 'global' or 'guild:<guild-uuid>'
@@ -153,6 +177,8 @@ alter table guild_bosses enable row level security;
 alter table guild_boss_damage_log enable row level security;
 alter table items enable row level security;
 alter table inventory enable row level security;
+alter table enemies enable row level security;
+alter table player_combat enable row level security;
 alter table chat_messages enable row level security;
 alter table whispers enable row level security;
 alter table item_transfers enable row level security;
@@ -181,6 +207,13 @@ create policy "item catalog is publicly readable" on items for select using (tru
 
 drop policy if exists "players see only their own inventory" on inventory;
 create policy "players see only their own inventory" on inventory
+  for select using (profile_id = auth.uid());
+
+drop policy if exists "enemy catalog is publicly readable" on enemies;
+create policy "enemy catalog is publicly readable" on enemies for select using (true);
+
+drop policy if exists "players see only their own combat state" on player_combat;
+create policy "players see only their own combat state" on player_combat
   for select using (profile_id = auth.uid());
 
 drop policy if exists "global chat is publicly readable" on chat_messages;
@@ -334,6 +367,129 @@ begin
   end if;
 
   return new_actions;
+end;
+$$;
+
+-- ----------------------------------------------------------------------------
+-- 4c. Solo enemy combat (test rat)
+--    A minimal player-vs-mob loop to drive the Current Battle panel outside
+--    of guild bosses: one enemy at a time, tracked in player_combat.
+--    get_or_spawn_player_enemy() creates/respawns the fight; strike_enemy()
+--    is the "Strike" button's RPC — deal damage, take a counter-hit if the
+--    enemy survives, and respawn immediately on defeat so there's always
+--    something to test against. No action-point cost yet (actions still
+--    aren't spent anywhere) and no real death penalty (hp just resets to
+--    max) — both are TUNE spots once this becomes a real feature.
+-- ----------------------------------------------------------------------------
+
+create or replace function get_or_spawn_player_enemy(p_enemy_key text default 'test_rat')
+returns player_combat
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  pc player_combat%rowtype;
+  e enemies%rowtype;
+begin
+  select * into e from enemies where key = p_enemy_key;
+  if not found then raise exception 'no such enemy'; end if;
+
+  select * into pc from player_combat where profile_id = auth.uid();
+
+  if not found then
+    insert into player_combat (profile_id, enemy_key, enemy_hp)
+    values (auth.uid(), p_enemy_key, e.max_hp)
+    returning * into pc;
+    return pc;
+  end if;
+
+  if pc.enemy_key <> p_enemy_key or pc.enemy_hp <= 0 then
+    update player_combat
+      set enemy_key = p_enemy_key, enemy_hp = e.max_hp, updated_at = now()
+      where profile_id = auth.uid()
+      returning * into pc;
+  end if;
+
+  return pc;
+end;
+$$;
+
+create or replace function strike_enemy(p_enemy_key text default 'test_rat')
+returns table (
+  damage_dealt int,
+  enemy_defeated boolean,
+  enemy_hp int,
+  enemy_max_hp int,
+  player_hp int,
+  player_max_hp int,
+  xp_gained int,
+  gold_gained int
+)
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  p profiles%rowtype;
+  e enemies%rowtype;
+  pc player_combat%rowtype;
+  dmg int;
+  defeated boolean := false;
+  gained_xp int := 0;
+  gained_gold int := 0;
+  cooldown interval := interval '1 second'; -- TUNE: just enough to stop double-fires
+  new_player_hp int;
+  new_enemy_hp int;
+begin
+  select * into p from profiles where id = auth.uid() for update;
+  if not found then raise exception 'no profile'; end if;
+
+  select * into e from enemies where key = p_enemy_key;
+  if not found then raise exception 'no such enemy'; end if;
+
+  pc := get_or_spawn_player_enemy(p_enemy_key);
+
+  if pc.last_strike_at is not null and pc.last_strike_at + cooldown > now() then
+    raise exception 'strike is on cooldown';
+  end if;
+
+  dmg := greatest(1, p.attack);
+  new_enemy_hp := greatest(0, pc.enemy_hp - dmg);
+
+  if new_enemy_hp <= 0 then
+    defeated := true;
+    gained_xp := e.xp_reward;
+    gained_gold := e.gold_reward;
+  end if;
+
+  new_player_hp := p.hp;
+  if not defeated then
+    new_player_hp := greatest(0, p.hp - e.attack);
+    if new_player_hp <= 0 then
+      new_player_hp := p.max_hp; -- basic "knocked out, back on your feet" reset — no penalty yet
+    end if;
+  end if;
+
+  update profiles
+    set hp = new_player_hp,
+        xp = xp + gained_xp,
+        gold = gold + gained_gold
+    where id = p.id;
+
+  if defeated then
+    -- immediate respawn so there's always something to test against
+    update player_combat
+      set enemy_hp = e.max_hp, updated_at = now(), last_strike_at = now()
+      where profile_id = auth.uid();
+    new_enemy_hp := e.max_hp;
+  else
+    update player_combat
+      set enemy_hp = new_enemy_hp, updated_at = now(), last_strike_at = now()
+      where profile_id = auth.uid();
+  end if;
+
+  return query select dmg, defeated, new_enemy_hp, e.max_hp, new_player_hp, p.max_hp, gained_xp, gained_gold;
 end;
 $$;
 
@@ -703,4 +859,10 @@ insert into items (key, name, description, rarity, item_type, base_value) values
   ('rusty_shard',   'Rusty Abyssal Shard Fragment', 'A dull fragment. Barely worth anything, but it''s something.', 'common', 'material', 1),
   ('torchstone',    'Torchstone',                   'Glows faintly even in the deepest dark.', 'uncommon', 'material', 10),
   ('echo_charm',    'Echo Charm',                    'Hums with a voice that isn''t yours.', 'rare', 'trinket', 50)
+on conflict (key) do nothing;
+
+-- a weak, always-available test enemy so the Current Battle panel has
+-- something to fight before real mob content exists
+insert into enemies (key, name, max_hp, attack, xp_reward, gold_reward) values
+  ('test_rat', 'Test Rat', 20, 2, 5, 2)
 on conflict (key) do nothing;

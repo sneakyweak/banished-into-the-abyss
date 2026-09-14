@@ -6,9 +6,11 @@ const sb = supabase.createClient(window.SUPABASE_URL, window.SUPABASE_ANON_KEY);
 const state = {
   user: null,
   profile: null,
+  selectedClass: null, // 'warrior' | 'archer' | 'magi' | 'striker' — chosen on the auth screen before signup
   guild: null,        // { id, name, tag, ... }
   members: [],
   boss: null,
+  enemy: null,         // { enemy_key, enemy_hp, name, max_hp, attack, xp_reward, gold_reward }
   activeTab: "global", // 'global' | 'guild' | 'whispers'
   chatChannelSub: null,
   whisperSub: null,
@@ -52,6 +54,20 @@ function resetTickBar() {
 // ---------------------------------------------------------------------------
 
 const USERNAME_RE = /^[A-Za-z0-9_]{3,20}$/;
+const CLASS_PORTRAITS = {
+  warrior: "img/class-warrior-avatar.jpg",
+  archer: "img/class-archer-avatar.jpg",
+  magi: "img/class-magi-avatar.jpg",
+  striker: "img/class-striker-avatar.jpg",
+};
+
+document.querySelectorAll(".class-card").forEach((card) => {
+  card.addEventListener("click", () => {
+    document.querySelectorAll(".class-card").forEach((c) => c.classList.remove("selected"));
+    card.classList.add("selected");
+    state.selectedClass = card.dataset.class;
+  });
+});
 
 // deterministic: the same username always maps to the same address, so
 // sign-in never has to look anything up first. The .invalid TLD is reserved
@@ -66,10 +82,13 @@ $("btn-signup").addEventListener("click", async () => {
   if (!USERNAME_RE.test(username)) {
     return showAuthError("Pick a character name: 3-20 chars, letters/numbers/_ only.");
   }
+  if (!state.selectedClass) {
+    return showAuthError("Choose a class above before signing up.");
+  }
   const { error } = await sb.auth.signUp({
     email: usernameToFakeEmail(username),
     password,
-    options: { data: { username } },
+    options: { data: { username, class: state.selectedClass } },
   });
   if (error) {
     // Supabase's generic "already registered" message talks about email —
@@ -121,6 +140,7 @@ async function enterGame(user) {
   await loadProfile();
   await loadGuildMembership();
   await loadInventory();
+  await loadEnemy();
   await loadChatHistory("global");
   subscribeChat("global");
   subscribeWhispers();
@@ -142,6 +162,8 @@ function leaveGame() {
   state.user = null;
   state.profile = null;
   state.guild = null;
+  state.selectedClass = null;
+  document.querySelectorAll(".class-card").forEach((c) => c.classList.remove("selected"));
   $("game-screen").classList.add("hidden");
   $("auth-screen").classList.remove("hidden");
 }
@@ -164,6 +186,15 @@ function renderProfile() {
   $("char-name").textContent = p.username;
   $("battle-player-name").textContent = p.username;
   $("battle-player-level").textContent = p.level;
+
+  const portraitSrc = CLASS_PORTRAITS[p.class] || CLASS_PORTRAITS.warrior;
+  const className = p.class ? p.class.charAt(0).toUpperCase() + p.class.slice(1) : "Wanderer";
+  $("avatar-portrait").src = portraitSrc;
+  $("avatar-portrait").alt = className;
+  $("avatar-label").textContent = className;
+  $("battle-player-portrait").src = portraitSrc;
+  $("battle-player-portrait").alt = className;
+
   $("stat-depth").textContent = p.depth;
   $("stat-level").textContent = p.level;
   $("stat-xp").textContent = p.xp;
@@ -172,7 +203,52 @@ function renderProfile() {
   $("stat-attack").textContent = p.attack;
   $("stat-actions").textContent = p.actions;
   $("stat-max-actions").textContent = p.max_actions;
+
+  const hpPct = Math.max(0, Math.min(100, (p.hp / p.max_hp) * 100));
+  $("player-hp-fill").style.width = hpPct + "%";
+  $("player-hp-text").textContent = `${p.hp} / ${p.max_hp} HP`;
 }
+
+// ---------------------------------------------------------------------------
+// Solo enemy combat (Test Rat) — drives the Current Battle panel's player
+// vs. enemy display independently of guilds/guild bosses.
+// ---------------------------------------------------------------------------
+
+const TEST_ENEMY_KEY = "test_rat";
+
+async function loadEnemy() {
+  const { data, error } = await sb.rpc("get_or_spawn_player_enemy", { p_enemy_key: TEST_ENEMY_KEY });
+  if (error) return console.error(error);
+  const pc = Array.isArray(data) ? data[0] : data; // single-row RPC shape varies by PostgREST version
+  const { data: def, error: defErr } = await sb.from("enemies").select("*").eq("key", pc.enemy_key).single();
+  if (defErr) return console.error(defErr);
+  state.enemy = { ...def, enemy_hp: pc.enemy_hp };
+  renderEnemy();
+}
+
+function renderEnemy() {
+  const en = state.enemy;
+  if (!en) return;
+  $("enemy-name").textContent = en.name;
+  const pct = Math.max(0, Math.min(100, (en.enemy_hp / en.max_hp) * 100));
+  $("enemy-hp-fill").style.width = pct + "%";
+  $("enemy-hp-text").textContent = `${en.enemy_hp} / ${en.max_hp} HP`;
+}
+
+$("btn-strike-enemy").addEventListener("click", async () => {
+  const { data, error } = await sb.rpc("strike_enemy", { p_enemy_key: TEST_ENEMY_KEY });
+  if (error) return alert(error.message);
+  const row = data?.[0];
+  if (row && state.enemy) {
+    state.enemy.enemy_hp = row.enemy_hp;
+    state.enemy.max_hp = row.enemy_max_hp;
+    renderEnemy();
+    $("tick-log").textContent = row.enemy_defeated
+      ? `You slew the ${state.enemy.name}! +${row.xp_gained} xp, +${row.gold_gained} gold.`
+      : `You struck the ${state.enemy.name} for ${row.damage_dealt} damage.`;
+  }
+  await loadProfile(); // picks up updated hp/xp/gold
+});
 
 async function loadInventory() {
   const { data, error } = await sb
