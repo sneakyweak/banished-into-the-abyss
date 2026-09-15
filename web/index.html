@@ -180,7 +180,8 @@
             <li><span class="stat-label" data-tooltip="How many rounds you get each time you act (Refresh Actions / idle tick). Higher Attack Speed means more swings per fight.">Attack Speed</span><span id="stat-attack-speed">0</span></li>
             <li><span class="stat-label" data-tooltip="Chance for any hit -- yours or an enemy's -- to deal double damage.">Crit</span><span id="stat-crit">0%</span></li>
             <li><span class="stat-label" data-tooltip="Chance for a bonus extra swing on your turn, cascading to the next still-alive enemy in the pack.">Multi Strike</span><span id="stat-multi-strike">0%</span></li>
-            <li><span class="stat-label" data-tooltip="Not yet wired into combat -- reserved for a future turn-order/initiative mechanic.">Speed</span><span id="stat-speed">0</span></li>
+            <li><span class="stat-label" data-tooltip="Decides who swings first each round -- compared against the current pack's average Speed, recomputed every round as members die. Ties go to you. Also drives Evasion below.">Speed</span><span id="stat-speed">0</span></li>
+            <li><span class="stat-label" data-tooltip="Your chance to dodge an enemy hit entirely -- 0 damage, not even a graze. 1 Speed = 1% Evasion, hard-capped at 50% total.">Evasion</span><span id="stat-evasion">0%</span></li>
           </ul>
           <div class="panel-divider"></div>
           <h3 class="panel-subtitle affix-slots-title" data-tooltip="Reserved slots for bonus effects gear will eventually roll -- the same affixes packs can already spawn with, just permanently equipped instead of fight-only.">Additional Affixes</h3>
@@ -201,6 +202,14 @@
       <div class="col-main">
         <section class="panel battle-panel">
           <h2 class="panel-title">Current Battle</h2>
+          <!-- Daily Totals: server-tracked (player_combat.daily_* in
+               schema.sql), resets once per calendar day rather than once
+               per page load — damage dealt/taken, kills, deaths, idle
+               income, and whatever else gets tracked later (crits,
+               statuses, etc). Kept at the top, separate from the per-tick
+               fight message below, so it always reads as a running total
+               rather than something that just happened. -->
+          <p id="daily-totals-summary" class="log battle-stats-summary"></p>
           <div class="battle-arena">
             <div class="battle-side battle-player">
               <!-- No player portrait here (it's already shown elsewhere on
@@ -215,20 +224,19 @@
               <div id="player-hp-text" class="battle-hp-text"></div>
             </div>
             <!-- The enemy pack (1-30 members, per the Number of Enemies
-                 Spawned dropdown below) — rendered by app.js's renderPack()
-                 as a vertical list of rows so any pack size reads clearly.
-                 Each member row gets its own placeholder art slot; swap for
-                 a real <img> per enemy_key once mob art exists. -->
+                 Spawned dropdown below) — rendered by app.js's renderPack(),
+                 2 per row so any pack size reads clearly. Each member row
+                 gets its own placeholder art slot; swap for a real <img>
+                 per enemy_key once mob art exists. -->
             <div class="battle-pack" id="battle-pack"></div>
           </div>
           <!-- Active affixes (enemy-side) / debuffs (player-side, self-imposed)
                for the current pack — see the dropdowns below. -->
           <p id="active-modifiers" class="log active-modifiers"></p>
+          <!-- The current tick's fight outcome ONLY -- see doTick() in
+               app.js. Daily Totals above is the running total; this is
+               just "what just happened". -->
           <p id="tick-log" class="log battle-summary"></p>
-          <!-- Running session totals (damage dealt/taken, kills, deaths, idle
-               income, and whatever else gets tracked later — crits, statuses,
-               etc.). -->
-          <p id="battle-stats-summary" class="log battle-stats-summary"></p>
 
           <div class="tick-bar"><div id="tick-bar-fill" class="tick-fill"></div></div>
           <button id="btn-refresh-actions">Refresh Actions (<span id="stat-actions">0</span>)</button>
@@ -241,19 +249,19 @@
                settings. -->
           <div class="encounter-settings">
             <label class="encounter-setting">
-              <span>Number of Affixes</span>
+              <span class="setting-label-text">Number of Affixes <span class="setting-max" id="max-affix-count"></span></span>
               <input type="number" id="sel-affix-count" min="0" max="5" step="1" inputmode="numeric" />
             </label>
             <label class="encounter-setting">
-              <span>Number of Enemies Spawned</span>
+              <span class="setting-label-text">Number of Enemies Spawned <span class="setting-max" id="max-pack-size"></span></span>
               <input type="number" id="sel-pack-size" min="1" max="30" step="1" inputmode="numeric" />
             </label>
             <label class="encounter-setting">
-              <span>Player Debuffs</span>
+              <span class="setting-label-text">Player Debuffs <span class="setting-max" id="max-debuff-count"></span></span>
               <input type="number" id="sel-debuff-count" min="0" max="4" step="1" inputmode="numeric" />
             </label>
             <label class="encounter-setting">
-              <span>Number of Banishments</span>
+              <span class="setting-label-text">Number of Banishments <span class="setting-max" id="max-banishment-bracket"></span></span>
               <input type="number" id="sel-banishment-bracket" min="0" max="0" step="1" inputmode="numeric" />
             </label>
           </div>
@@ -282,8 +290,12 @@
         <section class="panel equipment-panel">
           <h2 class="panel-title">Equipment</h2>
           <p class="log">Not wired up yet — gear will land here once crafting/drops exist.</p>
+          <!-- Helm sits alone, centered above the rest, like a head slot on
+               a classic equipment doll -- Weapon now takes the spot in the
+               grid Helm used to occupy. -->
+          <div class="equip-slot equip-slot-centered"><span class="equip-slot-label">Helm</span></div>
           <div class="equip-grid">
-            <div class="equip-slot"><span class="equip-slot-label">Helm</span></div>
+            <div class="equip-slot"><span class="equip-slot-label">Weapon</span></div>
             <div class="equip-slot"><span class="equip-slot-label">Garb</span></div>
             <div class="equip-slot"><span class="equip-slot-label">Ring</span></div>
             <div class="equip-slot"><span class="equip-slot-label">Ring</span></div>
@@ -440,8 +452,14 @@
        brand-new visitor never sees it — only a browser that previously
        stored a different version. -->
   <script>
-    window.APP_VERSION = "21";
+    window.APP_VERSION = "22";
     window.PATCH_NOTES = [
+      "Speed is now wired into combat: it decides who swings first each round (compared against the pack's current average Speed, recomputed as members die -- ties go to you), and separately grants Evasion, a flat chance to dodge an enemy hit entirely (1 Speed = 1% Evasion, capped at 50%). Evasion is shown as its own line in Combat Stats.",
+      "New: dying now costs you 25% of your current gold and 10% of your current xp -- pushing your difficulty settings past your comfort zone is a real risk now, not a free reset.",
+      "The enemy pack now lays out 2 per row instead of 1, so a full pack takes half as many rows to show.",
+      "\"Session totals\" is now \"Daily Totals\", moved to the top of Current Battle, and resets once per calendar day instead of once per page reload -- it's tracked server-side now, so it stays consistent across tabs/devices instead of zeroing out every time you reload. The spot below the battle now shows only the current tick's fight outcome.",
+      "Equipment gained a Weapon slot. Helm now sits alone, centered above the rest, like a head slot on a classic equipment layout.",
+      "The 4 encounter-difficulty fields now show their real max value right in the label (e.g. \"Number of Affixes (max 11)\"), their labels wrap instead of overflowing past the input box, and the native up/down spinner arrows are gone (they were never the fast way to set these -- typing is).",
       "New affixes and debuffs, Abyssal/Void themed: enemies can now roll Voidscarred, Blackened Hide, Ravenous, Hollow Carapace, Voidtouched, or Maw of the Deep (11 affixes total, up from 5); Player Debuffs gained Voidbound, Chilled Blood, Marked by the Deep, Sundered Grip, and Sapped (9 debuffs total, up from 4).",
       "Number of Enemies Spawned now goes up to 30 (was capped at 5).",
       "The enemy pack now renders as a clean vertical list of rows instead of wrapping side-by-side columns -- much easier to read once a pack has more than a couple members.",

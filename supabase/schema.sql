@@ -264,9 +264,11 @@ create table if not exists enemies (
   attack       int not null default 1,
   defense      int not null default 0,  -- mitigates the player's damage per swing (see strike_enemy)
   xp_reward    int not null default 0,
-  gold_reward  int not null default 0
+  gold_reward  int not null default 0,
+  speed        int not null default 1  -- decides pack-vs-player initiative each round, see strike_enemy
 );
 alter table enemies add column if not exists defense int not null default 0;
+alter table enemies add column if not exists speed int not null default 1;
 -- "level" (added for the previous rounds-scale-with-enemy-level design,
 -- since superseded by attack_speed-driven round counts + elite/champion
 -- tiers below) never shipped past one iteration — drop it if a project ran
@@ -307,6 +309,82 @@ alter table player_combat add column if not exists affix_keys jsonb not null def
 alter table player_combat add column if not exists debuff_keys jsonb not null default '[]'::jsonb;
 alter table player_combat add column if not exists bracket_used int not null default 0;
 alter table player_combat add column if not exists enemy_key_used text;
+
+-- "Daily Totals" (see bump_daily_stats() below): unlike the old client-only
+-- session totals (which reset on every page reload and were never visible
+-- across devices/tabs), these live here so they're server-truth, shared by
+-- every surface reading this player's data, and reset once per calendar
+-- day instead of once per page load. Lazily reset (see bump_daily_stats)
+-- rather than cron-rolled at midnight, same "correct whenever someone next
+-- looks" philosophy as idle ticks and guild bosses — see DESIGN.md §6.
+alter table player_combat add column if not exists daily_dmg_dealt int not null default 0;
+alter table player_combat add column if not exists daily_dmg_taken int not null default 0;
+alter table player_combat add column if not exists daily_kills int not null default 0;
+alter table player_combat add column if not exists daily_deaths int not null default 0;
+alter table player_combat add column if not exists daily_idle_xp int not null default 0;
+alter table player_combat add column if not exists daily_idle_gold int not null default 0;
+alter table player_combat add column if not exists daily_reset_at date not null default current_date;
+
+-- Lazily resets player_combat's daily_* counters to 0 the first time
+-- they're touched after midnight (server/UTC date, not the player's local
+-- timezone — a TUNE spot if per-player timezones ever matter), then adds
+-- the given deltas and returns the resulting snapshot. Called from both
+-- strike_enemy() (dmg dealt/taken, kills, deaths) and perform_idle_tick()
+-- (idle xp/gold) so "Daily Totals" always reflects whichever kind of tick
+-- the player just did, not just combat. Upserts a player_combat row first
+-- since perform_idle_tick can fire before a brand-new player has ever
+-- spawned a pack (which is otherwise what creates that row).
+create or replace function bump_daily_stats(
+  p_dmg_dealt int default 0,
+  p_dmg_taken int default 0,
+  p_kills int default 0,
+  p_deaths int default 0,
+  p_idle_xp int default 0,
+  p_idle_gold int default 0
+)
+returns table (
+  daily_dmg_dealt int,
+  daily_dmg_taken int,
+  daily_kills int,
+  daily_deaths int,
+  daily_idle_xp int,
+  daily_idle_gold int,
+  daily_reset_at date
+)
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  cur_reset_at date;
+begin
+  insert into player_combat (profile_id) values (auth.uid())
+    on conflict (profile_id) do nothing;
+
+  select pc.daily_reset_at into cur_reset_at
+    from player_combat pc where profile_id = auth.uid() for update;
+
+  if cur_reset_at is distinct from current_date then
+    update player_combat set
+      daily_dmg_dealt = 0, daily_dmg_taken = 0, daily_kills = 0, daily_deaths = 0,
+      daily_idle_xp = 0, daily_idle_gold = 0, daily_reset_at = current_date
+    where profile_id = auth.uid();
+  end if;
+
+  return query
+    update player_combat set
+      daily_dmg_dealt = player_combat.daily_dmg_dealt + p_dmg_dealt,
+      daily_dmg_taken = player_combat.daily_dmg_taken + p_dmg_taken,
+      daily_kills = player_combat.daily_kills + p_kills,
+      daily_deaths = player_combat.daily_deaths + p_deaths,
+      daily_idle_xp = player_combat.daily_idle_xp + p_idle_xp,
+      daily_idle_gold = player_combat.daily_idle_gold + p_idle_gold
+    where profile_id = auth.uid()
+    returning player_combat.daily_dmg_dealt, player_combat.daily_dmg_taken, player_combat.daily_kills,
+              player_combat.daily_deaths, player_combat.daily_idle_xp, player_combat.daily_idle_gold,
+              player_combat.daily_reset_at;
+end;
+$$;
 
 -- ----------------------------------------------------------------------------
 -- Affixes (enemy-side) and debuffs (player-side): named modifier bundles a
@@ -723,8 +801,14 @@ $$;
 --    Tune the constants marked TUNE once you have something playable.
 -- ----------------------------------------------------------------------------
 
+drop function if exists perform_idle_tick();
+
 create or replace function perform_idle_tick()
-returns table (xp_gained bigint, gold_gained bigint, new_level int, boss_damage bigint)
+returns table (
+  xp_gained bigint, gold_gained bigint, new_level int, boss_damage bigint,
+  daily_dmg_dealt int, daily_dmg_taken int, daily_kills int, daily_deaths int,
+  daily_idle_xp int, daily_idle_gold int, daily_reset_at date
+)
 language plpgsql
 security definer
 set search_path = public
@@ -741,6 +825,7 @@ declare
   lvl int;
   dmg bigint := 0; -- guild bosses are disabled for now (see 4c below); kept
                     -- in the return signature so callers don't need to change
+  daily record;
 begin
   select * into p from profiles where id = auth.uid();
   if not found then
@@ -749,7 +834,10 @@ begin
 
   elapsed_seconds := least(extract(epoch from (now() - p.last_tick_at))::bigint, max_offline_seconds);
   if elapsed_seconds <= 0 then
-    return query select 0::bigint, 0::bigint, p.level, 0::bigint;
+    select * into daily from bump_daily_stats(); -- still refreshes/resets the daily snapshot, adds nothing
+    return query select 0::bigint, 0::bigint, p.level, 0::bigint,
+      daily.daily_dmg_dealt, daily.daily_dmg_taken, daily.daily_kills, daily.daily_deaths,
+      daily.daily_idle_xp, daily.daily_idle_gold, daily.daily_reset_at;
     return;
   end if;
 
@@ -767,8 +855,12 @@ begin
         last_active_at = now()
     where id = p.id;
 
+  select * into daily from bump_daily_stats(p_idle_xp := gained_xp::int, p_idle_gold := gained_gold::int);
+
   -- guild bosses are disabled for now — no idle damage is fed to them.
-  return query select gained_xp, gained_gold, lvl, dmg;
+  return query select gained_xp, gained_gold, lvl, dmg,
+    daily.daily_dmg_dealt, daily.daily_dmg_taken, daily.daily_kills, daily.daily_deaths,
+    daily.daily_idle_xp, daily.daily_idle_gold, daily.daily_reset_at;
 end;
 $$;
 
@@ -859,6 +951,21 @@ $$;
 --    passive xp/gold, which is time-based and keeps accruing offline
 --    regardless of actions — only this auto-strike loop is action-gated.
 --
+--    SPEED (initiative + evasion): the one standard stat from DESIGN.md
+--    §3a that wasn't wired into combat until now. Every round, whichever
+--    side has the higher effective Speed swings FIRST that round — the
+--    player's own (Speed stat + speed_pct mods) vs. the pack's average
+--    Speed among currently-alive members, recomputed every round since a
+--    thinning pack's average can shift as its faster/slower members die.
+--    Ties go to the player. Separately, Speed also grants the player a
+--    flat, hard-capped-at-50% evasion chance (1 Speed = 1 percentage point
+--    + evasion_flat mods) checked per incoming enemy hit, in
+--    pack_counterattack() — a dodge skips the damage roll entirely rather
+--    than rolling and zeroing it, so it stays distinguishable in the log.
+--    Enemies never get evasion or an initiative stat of their own beyond
+--    their rolled Speed value (used only for the pack's side of the
+--    initiative comparison) — this is a player-facing stat for now.
+--
 --    WIN/LOSS: xp and gold are only ever granted when a pack is fully
 --    cleared (event = 'kill') — never on a player death. A death fully
 --    heals the player and respawns a fresh pack (same selections), same as
@@ -905,6 +1012,10 @@ $$;
 -- name of input parameter" / ambiguity between the two signatures. Safe
 -- no-op on a project that's never defined it.
 drop function if exists enemy_effective_stats(text, text);
+-- same reasoning, this time for the current 4-arg signature: adding
+-- eff_speed below changes the RETURNS TABLE column list, which CREATE OR
+-- REPLACE can't do in place.
+drop function if exists enemy_effective_stats(text, text, int, numeric);
 
 create or replace function enemy_effective_stats(
   p_enemy_key text,
@@ -918,7 +1029,8 @@ returns table (
   eff_attack int,
   eff_defense int,
   eff_xp int,
-  eff_gold int
+  eff_gold int,
+  eff_speed int
 )
 language plpgsql
 stable
@@ -952,7 +1064,8 @@ begin
     greatest(1, ceil(e.attack * total_mult))::int,
     greatest(0, ceil(e.defense * total_mult))::int,
     greatest(0, ceil(e.xp_reward * total_mult))::int,
-    greatest(0, ceil(e.gold_reward * total_mult))::int;
+    greatest(0, ceil(e.gold_reward * total_mult))::int,
+    greatest(1, ceil(e.speed * total_mult))::int;
 end;
 $$;
 
@@ -1086,10 +1199,59 @@ begin
       'attack', stats.eff_attack,
       'defense', stats.eff_defense,
       'xp', stats.eff_xp,
-      'gold', stats.eff_gold
+      'gold', stats.eff_gold,
+      'speed', stats.eff_speed
     ));
   end loop;
   return result;
+end;
+$$;
+
+-- Resolves every still-alive pack member's counter-swing against the player
+-- in one pass, rolling the player's Speed-derived evasion chance (see
+-- cur_player_evasion_pct in strike_enemy) per hit before compute_damage
+-- ever runs — a dodge skips the damage roll entirely rather than rolling it
+-- and zeroing it out, so a dodge and a 0-damage hit stay distinguishable in
+-- the log ('dodged' vs 'dmg':0). Returns the total hp delta (always <= 0)
+-- rather than mutating anything itself, so the caller decides when/whether
+-- to clamp at 0 and check for a death — this is what strike_enemy calls
+-- from BOTH initiative orderings (enemies-first when out-sped, or the
+-- original player-then-pack order otherwise) instead of that ~20-line loop
+-- needing to be written out twice.
+create or replace function pack_counterattack(
+  p_pack jsonb,
+  p_player_defense numeric,
+  p_enemy_mods jsonb,
+  p_player_mods jsonb,
+  p_evasion_pct numeric
+)
+returns table (new_player_hp_delta int, hits jsonb)
+language plpgsql
+as $$
+declare
+  member jsonb;
+  i int;
+  hit record;
+  total_delta int := 0;
+  round_hits jsonb := '[]'::jsonb;
+begin
+  for i in 0 .. jsonb_array_length(p_pack) - 1 loop
+    member := p_pack -> i;
+    if (member->>'hp')::int > 0 then
+      if random() * 100 < greatest(0, p_evasion_pct) then
+        round_hits := round_hits || jsonb_build_array(jsonb_build_object(
+          'source', 'enemy', 'source_slot', i, 'dmg', 0, 'crit', false, 'dodged', true
+        ));
+      else
+        select * into hit from compute_damage((member->>'attack')::numeric, 0, p_player_defense, p_enemy_mods, p_player_mods);
+        total_delta := total_delta - hit.dmg;
+        round_hits := round_hits || jsonb_build_array(jsonb_build_object(
+          'source', 'enemy', 'source_slot', i, 'dmg', hit.dmg, 'crit', hit.was_crit, 'dodged', false
+        ));
+      end if;
+    end if;
+  end loop;
+  return query select total_delta, round_hits;
 end;
 $$;
 
@@ -1275,7 +1437,16 @@ returns table (
   rounds_log jsonb,
   final_pack jsonb,
   affix_names jsonb,
-  debuff_names jsonb
+  debuff_names jsonb,
+  xp_lost int,
+  gold_lost int,
+  daily_dmg_dealt int,
+  daily_dmg_taken int,
+  daily_kills int,
+  daily_deaths int,
+  daily_idle_xp int,
+  daily_idle_gold int,
+  daily_reset_at date
 )
 language plpgsql
 security definer
@@ -1295,10 +1466,16 @@ declare
   cur_player_max_hp int;
   cur_actions int;
   total_damage int := 0;
+  total_damage_taken int := 0;
   total_kills int := 0;
   total_deaths int := 0;
   total_xp int := 0;
   total_gold int := 0;
+  total_xp_lost int := 0;
+  total_gold_lost int := 0;
+  penalty_gold int;
+  penalty_xp int;
+  daily record;
   -- one entry per round actually fought, in order, so the client can play
   -- combat back round-by-round instead of only ever seeing the state after
   -- everything (including any clear/death respawn) has already resolved.
@@ -1320,6 +1497,17 @@ declare
   any_alive boolean;
   pack_xp int;
   pack_gold int;
+  -- Speed (see DESIGN.md §3a — the one standard stat that wasn't wired into
+  -- combat until now): decides who swings first each round, and separately
+  -- grants the player a flat, capped chance to dodge an enemy hit entirely
+  -- (0 damage, not even a graze). Recomputed once per fight (evasion) and
+  -- once per round (initiative, since pack_avg_speed shifts as members die).
+  cur_player_speed numeric;
+  cur_player_evasion_pct numeric;
+  pack_avg_speed numeric;
+  player_first boolean;
+  counter_delta int;
+  counter_hits jsonb;
 begin
   select * into p from profiles where id = auth.uid() for update;
   if not found then raise exception 'no profile'; end if;
@@ -1334,14 +1522,20 @@ begin
   -- "out of actions" and "on cooldown" cases return a quiet no-op row
   -- instead of raising — an exception every 8s would just spam the client.
   if p.actions < action_cost then
+    select * into daily from bump_daily_stats(); -- still refreshes/resets the daily snapshot, adds nothing
     return query select 0, 0, 0, 0, p.hp, p.max_hp, 0, 0, p.actions, true,
-      '[]'::jsonb, coalesce(pc.pack, '[]'::jsonb), '[]'::jsonb, '[]'::jsonb;
+      '[]'::jsonb, coalesce(pc.pack, '[]'::jsonb), '[]'::jsonb, '[]'::jsonb, 0, 0,
+      daily.daily_dmg_dealt, daily.daily_dmg_taken, daily.daily_kills, daily.daily_deaths,
+      daily.daily_idle_xp, daily.daily_idle_gold, daily.daily_reset_at;
     return;
   end if;
 
   if pc.last_strike_at is not null and pc.last_strike_at + cooldown > now() then
+    select * into daily from bump_daily_stats();
     return query select 0, 0, 0, 0, p.hp, p.max_hp, 0, 0, p.actions, false,
-      '[]'::jsonb, coalesce(pc.pack, '[]'::jsonb), '[]'::jsonb, '[]'::jsonb;
+      '[]'::jsonb, coalesce(pc.pack, '[]'::jsonb), '[]'::jsonb, '[]'::jsonb, 0, 0,
+      daily.daily_dmg_dealt, daily.daily_dmg_taken, daily.daily_kills, daily.daily_deaths,
+      daily.daily_idle_xp, daily.daily_idle_gold, daily.daily_reset_at;
     return;
   end if;
 
@@ -1363,6 +1557,18 @@ begin
   -- budget, not a per-hit damage roll.
   rounds_soft_budget := greatest(1, round(base_rounds * p.attack_speed * (1 + mod_val(player_mods, 'attack_speed_pct') / 100.0))::int);
   reward_mult := selection_reward_mult(p.sel_pack_size, p.sel_affix_count, p.sel_debuff_count, p.sel_banishment_bracket);
+
+  -- Speed -> initiative (compared per-round against the pack below, since
+  -- who's "faster" shifts as members die) and Speed -> evasion (a flat,
+  -- capped dodge chance owned by the player alone, same convention as
+  -- Crit/Multi Strike: N speed = N% evasion, hard-capped rather than an
+  -- asymptotic curve, matching DESIGN.md's relic-stat table style ("1% per
+  -- roll, cap 25%") that this is the core-stat sibling of. evasion_flat is
+  -- exposed so a future class bonus, gear roll, or affix can grant more of
+  -- it the same way multi_strike_flat/crit_chance_flat already do — it
+  -- doesn't need to be Speed alone forever, just today.
+  cur_player_speed := greatest(1, p.speed * (1 + mod_val(player_mods, 'speed_pct') / 100.0));
+  cur_player_evasion_pct := least(50, greatest(0, p.speed + mod_val(player_mods, 'evasion_flat')));
 
   cur_pack := pc.pack;
   -- a self-imposed hp_pct debuff temporarily lowers the player's effective
@@ -1388,6 +1594,50 @@ begin
     exit exchanges when rounds_run >= rounds_soft_budget or rounds_run >= rounds_hard_cap;
     rounds_run := rounds_run + 1;
     round_hits := '[]'::jsonb;
+
+    -- Initiative: recomputed every round, not once per fight — which side
+    -- is "faster" can shift as the pack thins out (a slow tank pack might
+    -- out-pace the player early but fall behind once only its quickest
+    -- straggler is left). Ties go to the player. Compared against the
+    -- ALIVE members' average speed, same reasoning as pack_avg_speed being
+    -- recomputed rather than cached from spawn time.
+    select coalesce(avg((e->>'speed')::numeric), 1) into pack_avg_speed
+      from jsonb_array_elements(cur_pack) e where (e->>'hp')::int > 0;
+    player_first := cur_player_speed >= pack_avg_speed;
+
+    if not player_first then
+      -- Out-sped: the pack gets this round's first blow in before the
+      -- player ever swings — evasion (cur_player_evasion_pct) is the only
+      -- thing that can save them from it now.
+      select t.new_player_hp_delta, t.hits into counter_delta, counter_hits
+        from pack_counterattack(cur_pack, p.defense::numeric, enemy_mods, player_mods, cur_player_evasion_pct) t;
+      cur_player_hp := greatest(0, cur_player_hp + counter_delta);
+      total_damage_taken := total_damage_taken - counter_delta;
+      round_hits := round_hits || counter_hits;
+
+      if cur_player_hp <= 0 then
+        -- Death penalty (see the player-first death branch below for the
+        -- full rationale): 25% of current gold, 10% of current xp, off
+        -- p.gold/p.xp as they stood when this call started — a death tick
+        -- never also earns a kill's reward in the same call (see the
+        -- single-event-per-tick banner comment above), so those are still
+        -- the player's true current totals at the moment they died.
+        penalty_gold := floor(p.gold * 0.25);
+        penalty_xp := floor(p.xp * 0.10);
+        total_gold_lost := total_gold_lost + penalty_gold;
+        total_xp_lost := total_xp_lost + penalty_xp;
+
+        round_log := round_log || jsonb_build_array(jsonb_build_object(
+          'hits', round_hits, 'pack', cur_pack,
+          'player_hp', 0, 'player_max_hp', cur_player_max_hp, 'event', 'death',
+          'gold_lost', penalty_gold, 'xp_lost', penalty_xp
+        ));
+        total_deaths := total_deaths + 1;
+        cur_player_hp := cur_player_max_hp;
+        cur_pack := apply_hp_mod(roll_pack(p_enemy_key, p.sel_pack_size, p.sel_banishment_bracket), hp_pct);
+        exit exchanges;
+      end if;
+    end if;
 
     -- player's primary swing: targets the first still-alive pack member
     select min(idx - 1) into target_idx
@@ -1453,39 +1703,49 @@ begin
       exit exchanges;
     end if;
 
-    -- every still-alive pack member swings back this round — more
-    -- enemies alive means more incoming hits per round, which is what
-    -- makes Number of Enemies Spawned a real difficulty knob rather than
-    -- just a bigger shared hp pool.
-    for i in 0 .. jsonb_array_length(cur_pack) - 1 loop
-      member := cur_pack -> i;
-      if (member->>'hp')::int > 0 then
-        select * into hit from compute_damage((member->>'attack')::numeric, 0, p.defense::numeric, enemy_mods, player_mods);
-        cur_player_hp := greatest(0, cur_player_hp - hit.dmg);
-        round_hits := round_hits || jsonb_build_array(jsonb_build_object(
-          'source', 'enemy', 'source_slot', i, 'dmg', hit.dmg, 'crit', hit.was_crit
+    if player_first then
+      -- Not out-sped this round: the pack only swings back AFTER taking
+      -- the player's hit above — the original, still-default order. (When
+      -- NOT player_first, this already happened at the top of the round,
+      -- before the player's swing — see above.)
+      select t.new_player_hp_delta, t.hits into counter_delta, counter_hits
+        from pack_counterattack(cur_pack, p.defense::numeric, enemy_mods, player_mods, cur_player_evasion_pct) t;
+      cur_player_hp := greatest(0, cur_player_hp + counter_delta);
+      total_damage_taken := total_damage_taken - counter_delta;
+      round_hits := round_hits || counter_hits;
+
+      if cur_player_hp <= 0 then
+        -- pack wiped the player — WIN-ONLY REWARDS: nothing is granted
+        -- here, only on a clear above. Still a tracked, reported outcome,
+        -- not a silent reset. Full heal (to this fight's effective cap)
+        -- and a fresh pack, same selections/affixes/debuffs. DEATH PENALTY:
+        -- 25% of current gold, 10% of current xp — enough to make pushing
+        -- Number of Banishments/pack size/affixes past a comfortable margin
+        -- a real risk, not just a free way to farm harder content until it
+        -- works. Off p.gold/p.xp as they stood when this call started (a
+        -- death tick never also earns a kill's reward in the same call —
+        -- see the single-event-per-tick banner comment above — so those are
+        -- still the player's true current totals at the moment they died).
+        -- Then STOP — same reasoning as the pack-cleared branch above:
+        -- this tick's fight is over the instant the player dies, not a
+        -- chance for the leftover budget to kill them again against the
+        -- freshly-rolled pack.
+        penalty_gold := floor(p.gold * 0.25);
+        penalty_xp := floor(p.xp * 0.10);
+        total_gold_lost := total_gold_lost + penalty_gold;
+        total_xp_lost := total_xp_lost + penalty_xp;
+
+        round_log := round_log || jsonb_build_array(jsonb_build_object(
+          'hits', round_hits, 'pack', cur_pack,
+          'player_hp', 0, 'player_max_hp', cur_player_max_hp, 'event', 'death',
+          'gold_lost', penalty_gold, 'xp_lost', penalty_xp
         ));
+
+        total_deaths := total_deaths + 1;
+        cur_player_hp := cur_player_max_hp;
+        cur_pack := apply_hp_mod(roll_pack(p_enemy_key, p.sel_pack_size, p.sel_banishment_bracket), hp_pct);
+        exit exchanges;
       end if;
-    end loop;
-
-    if cur_player_hp <= 0 then
-      -- pack wiped the player — WIN-ONLY REWARDS: nothing is granted
-      -- here, only on a clear above. Still a tracked, reported outcome,
-      -- not a silent reset. Full heal (to this fight's effective cap)
-      -- and a fresh pack, same selections/affixes/debuffs — no other
-      -- penalty (a TUNE spot once that becomes a real feature). Then STOP
-      -- — same reasoning as the pack-cleared branch above: this tick's
-      -- fight is over the instant the player dies, not a chance for the
-      -- leftover budget to kill them again against the freshly-rolled pack.
-      round_log := round_log || jsonb_build_array(jsonb_build_object(
-        'hits', round_hits, 'pack', cur_pack,
-        'player_hp', 0, 'player_max_hp', cur_player_max_hp, 'event', 'death'
-      ));
-
-      total_deaths := total_deaths + 1;
-      cur_player_hp := cur_player_max_hp;
-      cur_pack := apply_hp_mod(roll_pack(p_enemy_key, p.sel_pack_size, p.sel_banishment_bracket), hp_pct);
-      exit exchanges;
     end if;
 
     -- an ordinary round: still fighting, everything carries into the next.
@@ -1497,10 +1757,15 @@ begin
 
   update profiles
     set hp = cur_player_hp,
-        xp = xp + total_xp,
-        gold = gold + total_gold,
+        xp = greatest(0, xp + total_xp - total_xp_lost),
+        gold = greatest(0, gold + total_gold - total_gold_lost),
         actions = cur_actions
     where id = p.id;
+
+  select * into daily from bump_daily_stats(
+    p_dmg_dealt := total_damage, p_dmg_taken := total_damage_taken,
+    p_kills := total_kills, p_deaths := total_deaths
+  );
 
   update player_combat
     set pack = cur_pack, updated_at = now(), last_strike_at = now()
@@ -1509,7 +1774,10 @@ begin
   return query select rounds_run, total_damage, total_kills, total_deaths, cur_player_hp, cur_player_max_hp,
     total_xp, total_gold, cur_actions, false, round_log, cur_pack,
     (select coalesce(jsonb_agg(name), '[]'::jsonb) from affix_defs where key in (select jsonb_array_elements_text(pc.affix_keys))),
-    (select coalesce(jsonb_agg(name), '[]'::jsonb) from debuff_defs where key in (select jsonb_array_elements_text(pc.debuff_keys)));
+    (select coalesce(jsonb_agg(name), '[]'::jsonb) from debuff_defs where key in (select jsonb_array_elements_text(pc.debuff_keys))),
+    total_xp_lost, total_gold_lost,
+    daily.daily_dmg_dealt, daily.daily_dmg_taken, daily.daily_kills, daily.daily_deaths,
+    daily.daily_idle_xp, daily.daily_idle_gold, daily.daily_reset_at;
 end;
 $$;
 
@@ -2280,8 +2548,8 @@ on conflict (key) do nothing;
 
 -- a weak, always-available test enemy so the Current Battle panel has
 -- something to fight before real mob content exists
-insert into enemies (key, name, max_hp, attack, defense, xp_reward, gold_reward) values
-  ('test_rat', 'Test Rat', 20, 2, 0, 5, 2)
+insert into enemies (key, name, max_hp, attack, defense, xp_reward, gold_reward, speed) values
+  ('test_rat', 'Test Rat', 20, 2, 0, 5, 2, 1)
 on conflict (key) do nothing;
 
 -- v1-v2 affix/debuff content. All pure stat-mod bundles (see
@@ -2295,10 +2563,11 @@ on conflict (key) do nothing;
 -- enemy — see strike_enemy()), so they're restricted to the keys
 -- compute_damage()/apply_hp_mod() actually read: attack_pct, attack_flat,
 -- damage_pct, damage_reduction_pct, defense_pct, crit_chance_flat, hp_pct.
--- multi_strike_flat/attack_speed_pct are deliberately never used on an
--- affix — strike_enemy() only ever reads those two out of player_mods (see
--- the class-bonus comment below), so on an affix they'd silently do
--- nothing. Values below are tuned against the current early-game baseline
+-- multi_strike_flat/attack_speed_pct/evasion_flat/speed_pct are
+-- deliberately never used on an affix — strike_enemy() only ever reads
+-- those four out of player_mods (see the class-bonus comment below), so on
+-- an affix they'd silently do nothing. Values below are tuned against the
+-- current early-game baseline
 -- (profiles default: attack 8, defense 6, max_hp 30; test_rat base: attack
 -- 2, defense 0, max_hp 20) scaled by tier (normal/elite/champion =
 -- 1.0/1.25/1.5x) and the chosen Banishment bracket (sqrt ramp) — see
@@ -2344,11 +2613,12 @@ insert into affix_defs (key, name, description, mods) values
 on conflict (key) do update set name = excluded.name, description = excluded.description, mods = excluded.mods;
 
 -- Debuffs are player-side (folded into player_mods, alongside the class
--- bonus), so — unlike affixes — they CAN use multi_strike_flat and
--- attack_speed_pct, since strike_enemy() reads both of those straight out
--- of player_mods (see the class-bonus comment below). Magnitudes are kept
--- in the same range as the original four (roughly -10 to -25) so no single
--- new debuff swings a fight harder than picking one of the originals would.
+-- bonus), so — unlike affixes — they CAN use multi_strike_flat,
+-- attack_speed_pct, evasion_flat, and speed_pct, since strike_enemy() reads
+-- all four of those straight out of player_mods (see the class-bonus
+-- comment below). Magnitudes are kept in the same range as the original
+-- four (roughly -10 to -25) so no single new debuff swings a fight harder
+-- than picking one of the originals would.
 insert into debuff_defs (key, name, description, mods) values
   ('weakened',        'Weakened',         'Your Power is reduced for this fight.',
     '{"attack_pct": -20}'::jsonb),
@@ -2393,7 +2663,12 @@ on conflict (key) do update set name = excluded.name, description = excluded.des
 -- — Multi Strike's roll happens directly in strike_enemy() rather than
 -- inside compute_damage(), so it's read there explicitly rather than via
 -- compute_damage's p_atk_mods. attack_speed_pct works the same way, read
--- directly in strike_enemy() to scale the pack round budget.
+-- directly in strike_enemy() to scale the pack round budget. evasion_flat
+-- (added on top of the player's raw Speed, both hard-capped at 50%
+-- combined) and speed_pct (a % bonus to Speed itself, feeding both
+-- evasion and initiative) are the newest two of this "read directly in
+-- strike_enemy(), not via compute_damage()" family — see
+-- cur_player_evasion_pct/cur_player_speed there.
 -- Every class bonus below is intentionally a POSITIVE percentage only — no
 -- class carries a downside. As gear/Banishment later push the underlying
 -- base stats up, each class's flat percentages become correspondingly

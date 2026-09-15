@@ -14,11 +14,14 @@ const state = {
   pack: [],            // current enemy pack: [{ enemy_key, name, tier, hp, max_hp, attack, defense, xp, gold }, ...]
   affixNames: [],      // display names of this pack's active affixes (enemy-side modifiers)
   debuffNames: [],     // display names of this pack's active debuffs (player-side, self-imposed)
-  // Running totals for this browser session (resets on page load — not
-  // persisted server-side). Extensible: add more fields here (crits landed,
-  // status effects applied/received, etc.) as those get tracked, and add a
-  // matching line to renderBattleStats() below.
-  battleStats: { damageDealt: 0, damageTaken: 0, kills: 0, deaths: 0, idleXp: 0, idleGold: 0 },
+  // "Daily Totals" -- server-truth (see player_combat.daily_* / bump_daily_stats
+  // in schema.sql), reset once per calendar day rather than once per page
+  // load like the old client-only session totals were. Every strike_enemy/
+  // perform_idle_tick response carries the current snapshot directly, so
+  // this is just wherever the most recent one landed -- never accumulated
+  // client-side. Extensible: add more fields here as new daily_* columns
+  // get tracked, and a matching line to renderDailyTotals() below.
+  dailyStats: { dmgDealt: 0, dmgTaken: 0, kills: 0, deaths: 0, idleXp: 0, idleGold: 0, resetAt: null },
   activeTab: "global", // 'global' | 'guild' | 'whispers'
   chatChannelSub: null,
   whisperSub: null,
@@ -446,7 +449,7 @@ async function enterGame(user) {
   await loadGuildMembership();
   await loadInventory();
   await loadPack();
-  renderBattleStats();
+  await loadDailyTotals();
   await loadChatHistory("global");
   subscribeChat("global");
   subscribeWhispers();
@@ -569,6 +572,11 @@ function renderProfile() {
   $("stat-crit").textContent = `${p.crit + (classMods.crit_chance_flat || 0)}%`;
   $("stat-multi-strike").textContent = `${p.multi_strike + (classMods.multi_strike_flat || 0)}%`;
   $("stat-speed").textContent = p.speed;
+  // Evasion is derived from Speed, not its own profiles column -- mirrors
+  // cur_player_evasion_pct in strike_enemy() (1 Speed = 1% Evasion, plus
+  // any future evasion_flat mod, hard-capped at 50% total).
+  const evasionPct = Math.min(50, Math.max(0, p.speed + (classMods.evasion_flat || 0)));
+  $("stat-evasion").textContent = `${evasionPct}%`;
 
   const hpPct = Math.max(0, Math.min(100, (p.hp / p.max_hp) * 100));
   $("player-hp-fill").style.width = hpPct + "%";
@@ -595,6 +603,16 @@ function renderEncounterSettings() {
   setNumberInput($("sel-pack-size"), 1, 30, p.sel_pack_size);
   setNumberInput($("sel-debuff-count"), 0, state.maxDebuffCount, p.sel_debuff_count);
   setNumberInput($("sel-banishment-bracket"), 0, p.depth, p.sel_banishment_bracket);
+
+  // The small "(max N)" tag next to each label -- kept in sync with the
+  // same bounds setNumberInput just applied above, so the two never drift
+  // apart. Number of Banishments has no real enforced ceiling (see
+  // set_encounter_settings in schema.sql -- typing above the displayed
+  // "top" is allowed on purpose), so it gets "no cap" instead of a number.
+  if ($("max-affix-count")) $("max-affix-count").textContent = `(max ${state.maxAffixCount})`;
+  if ($("max-pack-size")) $("max-pack-size").textContent = "(max 30)";
+  if ($("max-debuff-count")) $("max-debuff-count").textContent = `(max ${state.maxDebuffCount})`;
+  if ($("max-banishment-bracket")) $("max-banishment-bracket").textContent = "(no cap)";
 }
 
 // Keeps a manually-typed number input's min/max/value in sync with the
@@ -680,12 +698,12 @@ async function loadPack() {
   renderActiveModifiers();
 }
 
-// Renders the whole pack side of the arena as one row per member — a
+// Renders the whole pack side of the arena as one card per member — a
 // left-hand placeholder art slot (swap for a real <img> per enemy_key once
 // mob art exists) plus a name/hp-bar/hp-text block filling the rest of the
-// row's width. Stacked vertically (see .battle-pack/.pack-member in
-// style.css) instead of the old wrapping grid of narrow columns — reads far
-// more clearly once a pack can run past 5 members. Built with
+// card's width. Laid out 2 per row (see .battle-pack/.pack-member in
+// style.css) so a full pack takes half as many rows as one-per-row would.
+// Built with
 // textContent/DOM nodes rather than innerHTML+template strings since enemy
 // names, while server-controlled today, shouldn't need an escaping audit
 // later just because this function got reused for something less trusted.
@@ -754,21 +772,53 @@ function renderBattlePlayerHp(playerHp, playerMaxHp) {
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-// Renders state.battleStats (running session totals) under the per-tick
-// summary line. Idle xp/gold (passive, time-based — see perform_idle_tick
-// in schema.sql) are tracked and shown here SEPARATELY from combat, never
-// concatenated onto a combat result message — that concatenation used to
-// make a death read as if it had been rewarded, when the reward shown was
-// actually unrelated passive idle income (combat itself only ever grants
-// xp/gold on a win — see strike_enemy). Add a new field to state.battleStats
-// and a matching " • Label: value" clause here whenever a new stat/status
-// gets tracked.
-function renderBattleStats() {
-  const s = state.battleStats;
-  const el = $("battle-stats-summary");
+// Fetches the current "Daily Totals" snapshot without changing it (all
+// bump_daily_stats args default to 0 -- see schema.sql) so the panel shows
+// real numbers immediately on login instead of sitting at 0 until the
+// first tick. Also what lazily rolls the display over to a fresh day if
+// the player's very first action today is just opening the page.
+async function loadDailyTotals() {
+  const { data, error } = await sb.rpc("bump_daily_stats");
+  if (error) return console.error(error);
+  applyDailyTotals(data?.[0]);
+}
+
+// Adopts a daily_* snapshot returned by ANY of bump_daily_stats/
+// strike_enemy/perform_idle_tick (they all carry the same 7 daily_ fields)
+// as the new display state and re-renders. Never accumulated client-side —
+// the server is the only source of truth for these now (see
+// player_combat.daily_* in schema.sql), so this always just adopts
+// whatever the most recent response said.
+function applyDailyTotals(row) {
+  if (!row) return;
+  state.dailyStats = {
+    dmgDealt: row.daily_dmg_dealt || 0,
+    dmgTaken: row.daily_dmg_taken || 0,
+    kills: row.daily_kills || 0,
+    deaths: row.daily_deaths || 0,
+    idleXp: row.daily_idle_xp || 0,
+    idleGold: row.daily_idle_gold || 0,
+    resetAt: row.daily_reset_at || null,
+  };
+  renderDailyTotals();
+}
+
+// Renders state.dailyStats at the TOP of the Current Battle panel. Idle
+// xp/gold (passive, time-based — see perform_idle_tick in schema.sql) are
+// tracked and shown here SEPARATELY from combat, never concatenated onto
+// the per-tick combat message below (#tick-log) — that concatenation used
+// to make a death read as if it had been rewarded, when the reward shown
+// was actually unrelated passive idle income (combat itself only ever
+// grants xp/gold on a win — see strike_enemy). Add a new field to
+// state.dailyStats (and the matching daily_* column/bump_daily_stats arg
+// in schema.sql) and a matching " • Label: value" clause here whenever a
+// new stat/status gets tracked.
+function renderDailyTotals() {
+  const s = state.dailyStats;
+  const el = $("daily-totals-summary");
   if (!el) return;
   el.textContent =
-    `Session totals — Dmg dealt: ${s.damageDealt} • Dmg taken: ${s.damageTaken}` +
+    `Daily Totals — Dmg dealt: ${s.dmgDealt} • Dmg taken: ${s.dmgTaken}` +
     ` • Kills: ${s.kills} • Deaths: ${s.deaths} • Idle: +${s.idleXp} xp, +${s.idleGold} gold`;
 }
 
@@ -797,30 +847,26 @@ function renderBattleStats() {
 // plays that log back with a short delay per round before settling on the
 // true final state, capped well under the 8s tick interval so it always
 // finishes before the next tick.
+//
+// Returns { message, row } rather than just a string — doTick() needs the
+// raw row too, to adopt its daily_* snapshot as the authoritative "Daily
+// Totals" state for this tick (see applyDailyTotals). message/row are both
+// null on an error or a missing response row.
 async function autoStrikeEnemy() {
   const { data, error } = await sb.rpc("strike_enemy", { p_enemy_key: TEST_ENEMY_KEY });
   if (error) {
     console.error(error);
-    return null;
+    return { message: null, row: null };
   }
   const row = data?.[0];
-  if (!row) return null;
+  if (!row) return { message: null, row: null };
 
   const log = Array.isArray(row.rounds_log) ? row.rounds_log : [];
 
-  // Tally running session totals (see state.battleStats). damage_dealt,
-  // kills and deaths come straight from the server; damage taken isn't its
-  // own return column, so it's summed here from this call's rounds_log
-  // (every enemy hit landed this call, whether or not it played back).
-  const damageTakenThisCall = log.reduce((sum, entry) => {
-    const hits = Array.isArray(entry.hits) ? entry.hits : [];
-    return sum + hits.filter((h) => h.source === "enemy").reduce((s, h) => s + (h.dmg || 0), 0);
-  }, 0);
-  state.battleStats.damageDealt += row.damage_dealt || 0;
-  state.battleStats.damageTaken += damageTakenThisCall;
-  state.battleStats.kills += row.kills || 0;
-  state.battleStats.deaths += row.deaths || 0;
-  renderBattleStats();
+  // "Daily Totals" (see state.dailyStats) come straight from this RPC's
+  // own daily_* columns now — server-tracked and reset once per day, not
+  // accumulated client-side.
+  applyDailyTotals(row);
 
   if (log.length > 0) {
     // most rounds get a quick beat; a kill/death gets a longer one so the
@@ -845,7 +891,8 @@ async function autoStrikeEnemy() {
   renderActiveModifiers();
 
   if (row.rounds_fought === 0) {
-    return row.out_of_actions ? "Out of actions — click Refresh Actions to keep fighting." : null;
+    const message = row.out_of_actions ? "Out of actions — click Refresh Actions to keep fighting." : null;
+    return { message, row };
   }
 
   const roundsText = `${row.rounds_fought} round${row.rounds_fought === 1 ? "" : "s"}`;
@@ -861,11 +908,16 @@ async function autoStrikeEnemy() {
   if (outcomes.length) {
     msg = `You ${outcomes.join(" and ")} over ${roundsText}!`;
     if (row.xp_gained > 0 || row.gold_gained > 0) msg += ` +${row.xp_gained} xp, +${row.gold_gained} gold.`;
+    // Death penalty (see strike_enemy in schema.sql: 25% of current gold,
+    // 10% of current xp) — surfaced right on the death message itself so
+    // the cost of pushing past a comfortable difficulty is immediately
+    // visible, not just a quiet subtraction the player has to notice later.
+    if (row.gold_lost > 0 || row.xp_lost > 0) msg += ` Lost ${row.gold_lost} gold, ${row.xp_lost} xp.`;
   } else {
     msg = `You dealt ${row.damage_dealt} damage over ${roundsText}.`;
   }
   if (row.out_of_actions) msg += " Out of actions.";
-  return msg;
+  return { message: msg, row };
 }
 
 async function loadInventory() {
@@ -909,23 +961,22 @@ function renderInventory(rows) {
 async function doTick() {
   const { data, error } = await sb.rpc("perform_idle_tick");
   if (error) return console.error(error);
-  const row = data?.[0];
+  const idleRow = data?.[0];
 
   // one auto-strike against the current pack per tick — costs 1 action,
   // stops gracefully once the pool is empty (see autoStrikeEnemy above)
-  const strikeMsg = await autoStrikeEnemy();
+  const { message: strikeMsg, row: strikeRow } = await autoStrikeEnemy();
 
   await loadProfile();
 
-  // Passive idle income (time-based, unrelated to combat) is tracked in
-  // the session-totals line, not concatenated onto the combat message —
-  // see the comment on renderBattleStats for why that used to be
-  // confusing. tick-log shows ONLY the actual combat outcome.
-  if (row && (row.xp_gained > 0 || row.gold_gained > 0)) {
-    state.battleStats.idleXp += row.xp_gained || 0;
-    state.battleStats.idleGold += row.gold_gained || 0;
-    renderBattleStats();
-  }
+  // Daily Totals (see state.dailyStats/applyDailyTotals): autoStrikeEnemy
+  // already applied strikeRow's snapshot above if it got one, and that
+  // snapshot already reflects this cycle's idle income too (bump_daily_stats
+  // calls compose across sequential RPC calls in the same tick — see
+  // schema.sql). Only fall back to the idle tick's own snapshot here when
+  // the strike call didn't return a row at all (e.g. a network error).
+  if (!strikeRow) applyDailyTotals(idleRow);
+
   if (strikeMsg) $("tick-log").textContent = strikeMsg;
 }
 

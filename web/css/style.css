@@ -562,15 +562,20 @@ button:disabled { opacity: 0.4; cursor: not-allowed; }
 }
 .battle-sub { font-size: 0.75rem; color: var(--dim); }
 
-/* The enemy pack: any number of member rows (1-30), stacked vertically and
-   always full width — icon on the left, name/hp-bar/hp-text filling the
-   rest. A cleared member (hp 0) dims out rather than disappearing, so the
-   pack's original size stays visible mid-fight. */
+/* The enemy pack: any number of member cards (1-30), laid out 2 per row —
+   icon on the left of each card, name/hp-bar/hp-text filling the rest —
+   so a full 30-enemy pack is 15 rows instead of 30. Collapses to a single
+   column below 480px, where two side-by-side cards would get too cramped
+   to read. A cleared member (hp 0) dims out rather than disappearing, so
+   the pack's original size stays visible mid-fight. */
 .battle-pack {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 8px 10px;
   width: 100%;
+}
+@media (max-width: 480px) {
+  .battle-pack { grid-template-columns: 1fr; }
 }
 .pack-member {
   display: flex;
@@ -674,7 +679,20 @@ button:disabled { opacity: 0.4; cursor: not-allowed; }
   font-size: 0.75rem;
   color: var(--dim);
   text-align: left;
+  /* Fixed to the same width as the input below it (see max-width on the
+     input itself) rather than sized to fit the label text -- without this
+     a long label like "Number of Enemies Spawned" is free to stretch wider
+     than its input and spill past the input's edge instead of wrapping
+     onto a second line within the same column. */
+  width: 140px;
 }
+.setting-label-text { display: block; }
+/* Small dim tag next to each label showing the real enforced bound for
+   that field (kept in sync with the live catalog/pack-size caps by
+   renderEncounterSettings() in app.js) -- Number of Banishments has no
+   real ceiling (see set_encounter_settings in schema.sql), so its tag
+   reads "no cap" instead of a number. */
+.setting-max { color: var(--dim); opacity: 0.75; font-style: italic; }
 .encounter-setting select,
 .encounter-setting input[type="number"] {
   background: #0c0a10;
@@ -688,10 +706,18 @@ button:disabled { opacity: 0.4; cursor: not-allowed; }
   box-sizing: border-box;
 }
 .encounter-setting input[type="number"] {
-  /* keep the native up/down spinner (still the fastest way to nudge by 1)
-     but let typed manual entry work too -- no appearance override needed
-     beyond making sure the field isn't stretched wider than its label. */
   max-width: 140px;
+  /* These are manually-typed fields (that's the whole point of the switch
+     away from dropdowns) -- the native up/down spinner just adds visual
+     clutter and eats click targets without being the primary way anyone
+     sets a value here, so it's hidden across engines. */
+  -moz-appearance: textfield;
+  appearance: textfield;
+}
+.encounter-setting input[type="number"]::-webkit-outer-spin-button,
+.encounter-setting input[type="number"]::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
 }
 
 #member-list { list-style: none; padding: 0; margin: 0 0 10px; font-size: 0.85rem; color: var(--dim); }
@@ -757,6 +783,12 @@ button:disabled { opacity: 0.4; cursor: not-allowed; }
   opacity: 0.55;
 }
 .equip-slot-label { font-size: 0.75rem; letter-spacing: 0.5px; color: var(--dim); }
+
+/* Helm's standalone centered slot above the main grid -- same size as one
+   grid cell (grid-template-columns: 1fr 1fr, 10px gap => each column is
+   half the row width minus half the gap) so it doesn't look oversized
+   sitting by itself. */
+.equip-slot-centered { width: calc(50% - 5px); margin: 0 auto 10px; }
 
 .affix-slots-title { text-align: center; }
 .affix-slots-grid { grid-template-columns: repeat(2, 1fr); }
