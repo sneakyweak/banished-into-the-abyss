@@ -684,14 +684,19 @@ button:disabled { opacity: 0.4; cursor: not-allowed; }
      a long label like "Number of Enemies Spawned" is free to stretch wider
      than its input and spill past the input's edge instead of wrapping
      onto a second line within the same column. */
-  width: 140px;
+  width: 156px;
 }
-.setting-label-text { display: block; }
+/* Fixed-height reservation (not just display:block) so every column's
+   label occupies the same vertical space regardless of how many lines its
+   own text happens to wrap to -- without this, a 3-line label ("Number of
+   Banishments (max N)") pushes its own input down further than a 2-line
+   neighbor's, and the four input boxes no longer line up in a row. Sized
+   for 2 lines at this line-height; label text is kept short enough to fit
+   that at the column's 156px width. */
+.setting-label-text { display: block; line-height: 1.3; min-height: 2.6em; }
 /* Small dim tag next to each label showing the real enforced bound for
-   that field (kept in sync with the live catalog/pack-size caps by
-   renderEncounterSettings() in app.js) -- Number of Banishments has no
-   real ceiling (see set_encounter_settings in schema.sql), so its tag
-   reads "no cap" instead of a number. */
+   that field (kept in sync with the live catalog/pack-size/depth caps by
+   renderEncounterSettings() in app.js). */
 .setting-max { color: var(--dim); opacity: 0.75; font-style: italic; }
 .encounter-setting select,
 .encounter-setting input[type="number"] {
@@ -706,7 +711,7 @@ button:disabled { opacity: 0.4; cursor: not-allowed; }
   box-sizing: border-box;
 }
 .encounter-setting input[type="number"] {
-  max-width: 140px;
+  max-width: 156px;
   /* These are manually-typed fields (that's the whole point of the switch
      away from dropdowns) -- the native up/down spinner just adds visual
      clutter and eats click targets without being the primary way anyone
@@ -790,9 +795,11 @@ button:disabled { opacity: 0.4; cursor: not-allowed; }
    sitting by itself. */
 .equip-slot-centered { width: calc(50% - 5px); margin: 0 auto 10px; }
 
-.affix-slots-title { text-align: center; }
-.affix-slots-grid { grid-template-columns: repeat(2, 1fr); }
-.affix-slots-grid .equip-slot { aspect-ratio: auto; height: 44px; }
+/* Additional Affixes now reuses .stat-list's row layout (see Combat Stats
+   above) instead of the equipment panel's dashed slot boxes -- these read
+   as stats, not gear. Dimmed since the slots are unfilled/not wired up
+   yet, same intent as the old boxes' opacity. */
+.affix-list { opacity: 0.55; margin-top: 0; }
 
 /* Inventory */
 

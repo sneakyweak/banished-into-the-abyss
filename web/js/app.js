@@ -570,12 +570,16 @@ function renderProfile() {
   $("stat-defense").textContent = formatStatWithClassPct(p.defense, classMods.defense_pct);
   $("stat-attack-speed").textContent = formatStatWithClassPct(p.attack_speed, classMods.attack_speed_pct);
   $("stat-crit").textContent = `${p.crit + (classMods.crit_chance_flat || 0)}%`;
+  // Crit Damage is its own profiles column (crit_damage), same "raw
+  // percentage" shape as Crit itself -- mirrors compute_damage()'s
+  // p_crit_damage/crit_damage_flat in schema.sql.
+  $("stat-crit-damage").textContent = `${p.crit_damage + (classMods.crit_damage_flat || 0)}%`;
   $("stat-multi-strike").textContent = `${p.multi_strike + (classMods.multi_strike_flat || 0)}%`;
   $("stat-speed").textContent = p.speed;
   // Evasion is derived from Speed, not its own profiles column -- mirrors
   // cur_player_evasion_pct in strike_enemy() (1 Speed = 1% Evasion, plus
-  // any future evasion_flat mod, hard-capped at 50% total).
-  const evasionPct = Math.min(50, Math.max(0, p.speed + (classMods.evasion_flat || 0)));
+  // any future evasion_flat mod, hard-capped at 25% total).
+  const evasionPct = Math.min(25, Math.max(0, p.speed + (classMods.evasion_flat || 0)));
   $("stat-evasion").textContent = `${evasionPct}%`;
 
   const hpPct = Math.max(0, Math.min(100, (p.hp / p.max_hp) * 100));
@@ -587,32 +591,26 @@ function renderProfile() {
 
 const LAST_CLASS_KEY = "bita_last_class";
 
-// The 4 difficulty-bracket fields below Refresh Actions. Affix/Debuff
-// counts cap at however many actually exist in the game (state.maxAffixCount
-// / state.maxDebuffCount, loaded once at login -- see loadCatalogCounts).
-// Number of Banishments has no real ceiling at all (see
-// set_encounter_settings in schema.sql, which only rejects a negative
-// value) -- its max attribute is just set to the player's own Depth as a
-// sensible displayed "top", not an enforced cap; typing higher is allowed
-// and deliberately makes enemies tougher (see bracket_mult in
-// enemy_effective_stats).
+// The 3 difficulty fields below Refresh Actions. Affix/Debuff counts cap at
+// however many actually exist in the game (state.maxAffixCount /
+// state.maxDebuffCount, loaded once at login -- see loadCatalogCounts).
+// There used to be a 4th field here (Number of Banishments / a chosen
+// difficulty bracket) -- removed: the player's real Banishment count
+// (p.depth) now scales enemy difficulty automatically, see depth_mult in
+// enemy_effective_stats (schema.sql).
 function renderEncounterSettings() {
   const p = state.profile;
   if (!p) return;
   setNumberInput($("sel-affix-count"), 0, state.maxAffixCount, p.sel_affix_count);
   setNumberInput($("sel-pack-size"), 1, 30, p.sel_pack_size);
   setNumberInput($("sel-debuff-count"), 0, state.maxDebuffCount, p.sel_debuff_count);
-  setNumberInput($("sel-banishment-bracket"), 0, p.depth, p.sel_banishment_bracket);
 
   // The small "(max N)" tag next to each label -- kept in sync with the
   // same bounds setNumberInput just applied above, so the two never drift
-  // apart. Number of Banishments has no real enforced ceiling (see
-  // set_encounter_settings in schema.sql -- typing above the displayed
-  // "top" is allowed on purpose), so it gets "no cap" instead of a number.
+  // apart.
   if ($("max-affix-count")) $("max-affix-count").textContent = `(max ${state.maxAffixCount})`;
   if ($("max-pack-size")) $("max-pack-size").textContent = "(max 30)";
   if ($("max-debuff-count")) $("max-debuff-count").textContent = `(max ${state.maxDebuffCount})`;
-  if ($("max-banishment-bracket")) $("max-banishment-bracket").textContent = "(no cap)";
 }
 
 // Keeps a manually-typed number input's min/max/value in sync with the
@@ -635,35 +633,29 @@ function clampInt(n, min, max) {
   return Math.min(max, Math.max(min, Math.round(n)));
 }
 
-// Applies whatever the 4 dropdowns currently say via set_encounter_settings
+// Applies whatever the 3 fields currently say via set_encounter_settings
 // (validated server-side too — see schema.sql), then reloads the profile
-// (in case the bracket cap needs re-checking) and spawns a fresh pack under
-// the new settings. A rejected change (e.g. a stale bracket cap after this
-// tab sat open through a banishment elsewhere) snaps the dropdowns back to
-// the last known-good server state instead of leaving them showing
-// something that didn't actually take effect.
+// and spawns a fresh pack under the new settings. A rejected change snaps
+// the fields back to the last known-good server state instead of leaving
+// them showing something that didn't actually take effect.
 async function applyEncounterSettings() {
   // Free-typed input can be empty, negative, decimal, or way out of range --
   // clamp to each field's real bounds (same ones set_encounter_settings
   // enforces server-side) and write the clamped number straight back into
   // the field, so e.g. typing 99 affixes when only 5 exist visibly snaps
   // to 5 instead of just silently sending a different number than what's
-  // on screen. Banishment bracket has no upper bound to clamp to -- only
-  // guard against negative.
+  // on screen.
   const p_pack_size = clampInt(parseInt($("sel-pack-size").value, 10), 1, 30);
   const p_affix_count = clampInt(parseInt($("sel-affix-count").value, 10), 0, state.maxAffixCount);
   const p_debuff_count = clampInt(parseInt($("sel-debuff-count").value, 10), 0, state.maxDebuffCount);
-  const p_banishment_bracket = clampInt(parseInt($("sel-banishment-bracket").value, 10), 0, Infinity);
   $("sel-pack-size").value = String(p_pack_size);
   $("sel-affix-count").value = String(p_affix_count);
   $("sel-debuff-count").value = String(p_debuff_count);
-  $("sel-banishment-bracket").value = String(p_banishment_bracket);
 
   const { error } = await sb.rpc("set_encounter_settings", {
     p_pack_size,
     p_affix_count,
     p_debuff_count,
-    p_banishment_bracket,
   });
   if (error) {
     alert(error.message);
@@ -674,7 +666,7 @@ async function applyEncounterSettings() {
   await loadPack();
 }
 
-["sel-affix-count", "sel-pack-size", "sel-debuff-count", "sel-banishment-bracket"].forEach((id) => {
+["sel-affix-count", "sel-pack-size", "sel-debuff-count"].forEach((id) => {
   $(id)?.addEventListener("change", applyEncounterSettings);
 });
 

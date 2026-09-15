@@ -80,6 +80,13 @@ alter table profiles add column if not exists attack_speed numeric not null defa
 alter table profiles add column if not exists crit numeric not null default 0;
 alter table profiles add column if not exists multi_strike numeric not null default 0;
 alter table profiles add column if not exists speed int not null default 1;
+-- Crit Damage: the bonus % damage a crit deals on top of a normal hit, same
+-- "raw percentage" column shape as Crit itself (profiles.crit) rather than a
+-- multiplier -- reads naturally as "Crit Damage: 100%" next to "Crit Chance:
+-- 0%". Default 100 preserves compute_damage()'s original hardcoded 2x crit
+-- multiplier exactly (1 + 100/100 = 2x), so shipping this stat doesn't
+-- silently change existing crit damage until it's actually itemized via gear.
+alter table profiles add column if not exists crit_damage numeric not null default 100;
 
 -- base stat rebalance: Power (attack) 10 -> 1, Crit 5% -> 0%, Speed 10 -> 1,
 -- Defense 5 -> 1 (a deliberate difficulty change). Same "add column if not
@@ -133,17 +140,23 @@ update profiles set attack = 8 where attack = 1;
 update profiles set defense = 6 where defense = 1;
 update profiles set hp = 30, max_hp = 30 where max_hp = 10;
 
--- Difficulty-bracket selections (the dropdowns below Refresh Actions).
--- These are player preferences, not per-fight state — they persist across
--- fights and only take effect on the NEXT spawned pack (see
--- set_encounter_settings / get_or_spawn_pack below). "depth" (above) IS the
--- player's banishment count; sel_banishment_bracket is which bracket's
--- difficulty they're currently choosing to fight at, which can be pushed
--- above their own depth for extra risk/reward.
+-- Difficulty selections (the fields below Refresh Actions). These are
+-- player preferences, not per-fight state — they persist across fights and
+-- only take effect on the NEXT spawned pack (see set_encounter_settings /
+-- get_or_spawn_pack below). "depth" (above) IS the player's banishment
+-- count.
 alter table profiles add column if not exists sel_pack_size int not null default 1 check (sel_pack_size between 1 and 5);
 alter table profiles add column if not exists sel_affix_count int not null default 0 check (sel_affix_count between 0 and 5);
 alter table profiles add column if not exists sel_debuff_count int not null default 0 check (sel_debuff_count between 0 and 4);
-alter table profiles add column if not exists sel_banishment_bracket int not null default 0 check (sel_banishment_bracket >= 0);
+
+-- Removed: sel_banishment_bracket, the old "which bracket am I choosing to
+-- fight at" dial, separate from and pushable above the player's own actual
+-- Banishment count. There's only one Banishments number in the game now --
+-- see enemy_effective_stats()'s depth_mult, which scales enemy difficulty
+-- (and proportionally, their xp/gold reward) directly off profiles.depth
+-- automatically, no selection needed. A no-op on a project that's already
+-- dropped it.
+alter table profiles drop column if exists sel_banishment_bracket;
 
 -- The inline checks just above only ever apply on a fresh deploy (the
 -- column already existing makes "add column if not exists" a no-op, checks
@@ -845,7 +858,11 @@ begin
   gained_xp := floor(elapsed_seconds * xp_per_second * depth_multiplier);
   gained_gold := floor(elapsed_seconds * gold_per_second * depth_multiplier);
 
-  lvl := greatest(1, floor(sqrt((p.xp + gained_xp) / 100.0))::int); -- TUNE: level curve
+  -- greatest(p.level, ...): XP loss (e.g. strike_enemy()'s death penalty,
+  -- which docks xp but never touches level directly) must never delevel a
+  -- character -- level can only ever go up here, never recompute downward
+  -- just because xp dropped since the last time this ran.
+  lvl := greatest(p.level, 1, floor(sqrt((p.xp + gained_xp) / 100.0))::int); -- TUNE: level curve
 
   update profiles
     set xp = xp + gained_xp,
@@ -901,7 +918,7 @@ $$;
 -- ----------------------------------------------------------------------------
 -- 4c. Pack combat
 --    The player fights a PACK of 1-30 enemies at once (player-selected via
---    the difficulty-bracket dropdowns / set_encounter_settings), tracked in
+--    the difficulty fields / set_encounter_settings), tracked in
 --    player_combat.pack. get_or_spawn_pack() creates/respawns the pack;
 --    strike_enemy() is called automatically once per client idle-tick
 --    (every 8s, see app.js doTick()) rather than from a manual button.
@@ -930,19 +947,24 @@ $$;
 --    is just another row with a mods bundle from that vocabulary; nothing
 --    about the combat loop itself has to change.
 --
---    DIFFICULTY BRACKETS: enemy power also scales with the player's chosen
---    Number of Banishments bracket (profiles.sel_banishment_bracket, capped
---    at their own Depth + 3 — see set_encounter_settings), via a slow sqrt
---    ramp in enemy_effective_stats() — each further bracket level costs
---    progressively more relative power, so pushing brackets stays a real
---    (if increasingly risky) choice forever rather than either trivializing
---    or outrunning what a patient player can eventually out-level. Number
---    of Affixes, Number of Enemies Spawned, and Player Debuffs all make the
---    fight harder in their own way (see strike_enemy) and all feed
---    selection_reward_mult(), so choosing a harder bracket is rewarded
---    proportionally to how much harder it actually made the fight — not a
---    flat bonus. Every enemy spawn additionally rolls its own 0.85-1.25x
---    power variance (roll_pack), independent of all of the above.
+--    BANISHMENT SCALING: enemy power also scales automatically with the
+--    player's own Banishment count (profiles.depth — there's no separate
+--    "bracket" dial to choose anymore, just the one real Banishments
+--    number), a flat +5% per Banishment (depth_mult in
+--    enemy_effective_stats(), TUNE) applied on top of tier/variance. Linear
+--    rather than the old dial's sqrt ramp, and deliberately gentle since
+--    it's no longer an opt-in risk a player can decline — every fight gets
+--    slightly harder, forever, the more you've Banished, matching xp/gold
+--    reward scaling right alongside it (enemy_effective_stats() applies the
+--    same multiplier to eff_xp/eff_gold as it does to eff_attack/eff_hp).
+--    Number of Enemy Affixes, Number of Enemies Spawned, and Player
+--    Debuffs are the remaining player-chosen knobs that make a fight
+--    harder in their own way (see strike_enemy) and feed
+--    selection_reward_mult(), so choosing to stack any of those is
+--    rewarded proportionally to how much harder it actually made the
+--    fight — not a flat bonus. Every enemy spawn additionally rolls its
+--    own 0.85-1.25x power variance (roll_pack), independent of all of the
+--    above.
 --
 --    Elite/Champion tiers: every enemy spawn rolls normal/elite/champion at
 --    85%/10%/5% via roll_enemy_tier() on top of all the above scaling —
@@ -958,7 +980,7 @@ $$;
 --    Speed among currently-alive members, recomputed every round since a
 --    thinning pack's average can shift as its faster/slower members die.
 --    Ties go to the player. Separately, Speed also grants the player a
---    flat, hard-capped-at-50% evasion chance (1 Speed = 1 percentage point
+--    flat, hard-capped-at-25% evasion chance (1 Speed = 1 percentage point
 --    + evasion_flat mods) checked per incoming enemy hit, in
 --    pack_counterattack() — a dodge skips the damage roll entirely rather
 --    than rolling and zeroing it, so it stays distinguishable in the log.
@@ -967,9 +989,11 @@ $$;
 --    initiative comparison) — this is a player-facing stat for now.
 --
 --    WIN/LOSS: xp and gold are only ever granted when a pack is fully
---    cleared (event = 'kill') — never on a player death. A death fully
---    heals the player and respawns a fresh pack (same selections), same as
---    before, but grants nothing.
+--    cleared (event = 'kill') — never on a player death. Clearing a pack
+--    also heals the player 10% of their (fight-effective) max HP, on top of
+--    xp/gold, before the next pack is rolled. A death fully heals the
+--    player and respawns a fresh pack (same selections), same as before,
+--    but grants nothing.
 --
 --    Every individual pack (one player vs. 1-30 spawned enemies) always
 --    runs to a real conclusion — a clear or a player death — rather than
@@ -1020,7 +1044,7 @@ drop function if exists enemy_effective_stats(text, text, int, numeric);
 create or replace function enemy_effective_stats(
   p_enemy_key text,
   p_tier text,
-  p_bracket int default 0,      -- profiles.sel_banishment_bracket at spawn time
+  p_bracket int default 0,      -- profiles.depth at spawn time (how many times the player has Banished)
   p_variance numeric default 1.0 -- per-spawn power roll, see roll_pack (0.85-1.25)
 )
 returns table (
@@ -1039,7 +1063,7 @@ as $$
 declare
   e enemies%rowtype;
   tier_mult numeric;
-  bracket_mult numeric;
+  depth_mult numeric;
   total_mult numeric;
   prefix text;
 begin
@@ -1048,14 +1072,22 @@ begin
 
   tier_mult := case p_tier when 'champion' then 1.5 when 'elite' then 1.25 else 1.0 end; -- TUNE
 
-  -- Slow, DECELERATING ramp (sqrt, not linear/exponential): each further
-  -- bracket level buys progressively less extra power, so a bracket chosen
-  -- far above the player's own progress is meaningfully harder without
-  -- ever being a sheer wall — see the 4c banner comment above for why this
-  -- shape specifically. TUNE the 0.4 coefficient once playtested.
-  bracket_mult := 1 + sqrt(greatest(0, p_bracket)) * 0.4;
+  -- Flat, linear ramp: +5% per Banishment, forever, no diminishing or
+  -- accelerating curve. This used to be a sqrt ramp over a player-chosen
+  -- "how far above my own progress do I dare push it" dial (an opt-in
+  -- risk); now that it's automatic and unconditional (every Banishment
+  -- makes every fight harder, whether the player wants that or not that
+  -- run), a gentle flat rate fits the game's "infinite slow scaling"
+  -- design far better than either the old sqrt curve or a compounding
+  -- (exponential) one — 5% per Banishment reaches +100% (double) around
+  -- Banishment 20 and keeps climbing at the same steady pace forever
+  -- after, rather than the runaway growth a compounding rate would hit by
+  -- then. Same multiplier applies to eff_xp/eff_gold below, so reward
+  -- keeps pace with difficulty automatically. TUNE the 0.05 coefficient
+  -- once playtested.
+  depth_mult := 1 + greatest(0, p_bracket) * 0.05;
 
-  total_mult := tier_mult * bracket_mult * greatest(0.01, p_variance);
+  total_mult := tier_mult * depth_mult * greatest(0.01, p_variance);
   prefix := case p_tier when 'champion' then 'Champion ' when 'elite' then 'Elite ' else '' end;
 
   return query select
@@ -1117,12 +1149,20 @@ $$;
 -- balanced whether both stats are in the single digits or the millions,
 -- which is the whole trick for "infinite slow scaling without number
 -- bloat". Damage always floors at 1 so a fight can never literally stall.
+-- adding p_crit_damage below changes this function's argument signature, not
+-- just its body -- CREATE OR REPLACE can't "replace" that in place (it would
+-- instead create a second overload alongside the old 5-arg one, and any
+-- existing 5-arg call site would then be ambiguous between the two), so the
+-- old signature has to be dropped explicitly first.
+drop function if exists compute_damage(numeric, numeric, numeric, jsonb, jsonb);
+
 create or replace function compute_damage(
   p_attack numeric,
   p_crit_chance numeric,    -- base crit %, before crit_chance_flat mods
   p_defense numeric,
   p_atk_mods jsonb default '{}'::jsonb,
-  p_def_mods jsonb default '{}'::jsonb
+  p_def_mods jsonb default '{}'::jsonb,
+  p_crit_damage numeric default 100  -- base bonus crit dmg %, before crit_damage_flat mods
 )
 returns table (dmg int, was_crit boolean)
 language plpgsql
@@ -1133,6 +1173,7 @@ declare
   mitigation numeric;
   eff_dmg numeric;
   crit boolean;
+  crit_mult numeric;
 begin
   eff_attack := greatest(0,
     p_attack * (1 + mod_val(p_atk_mods, 'attack_pct') / 100.0) + mod_val(p_atk_mods, 'attack_flat')
@@ -1146,7 +1187,11 @@ begin
 
   crit := random() * 100 < greatest(0, p_crit_chance + mod_val(p_atk_mods, 'crit_chance_flat'));
   if crit then
-    eff_dmg := eff_dmg * 2;
+    -- crit_mult is a total multiplier (1.0 = no bonus); floored at 1.0 so a
+    -- crit can never deal LESS than a normal hit even if crit_damage_flat
+    -- mods somehow drove the bonus negative.
+    crit_mult := 1 + greatest(0, p_crit_damage + mod_val(p_atk_mods, 'crit_damage_flat')) / 100.0;
+    eff_dmg := eff_dmg * crit_mult;
   end if;
 
   return query select greatest(1, round(eff_dmg)::int), crit;
@@ -1255,13 +1300,21 @@ begin
 end;
 $$;
 
+-- Postgres can't CREATE OR REPLACE a function with a shorter parameter list
+-- — a project that already ran the old 4-arg (with p_bracket) version needs
+-- it dropped first. Safe no-op on a project that's never defined it.
+drop function if exists selection_reward_mult(int, int, int, int);
+
 -- How much extra a cleared pack is worth for having been made harder via
--- the selection dropdowns — additive per knob, so the bonus is always
--- proportional to how much harder that knob actually made the fight
--- (pack size = more incoming hits per round, affixes = tougher/harder-
--- hitting enemies, debuffs = a weaker player, bracket = flat-out bigger
--- enemy stats). TUNE each coefficient once playtested.
-create or replace function selection_reward_mult(p_pack_size int, p_affix_count int, p_debuff_count int, p_bracket int)
+-- the selection fields — additive per knob, so the bonus is always
+-- proportional to how much harder that knob actually made the fight (pack
+-- size = more incoming hits per round, affixes = tougher/harder-hitting
+-- enemies, debuffs = a weaker player). TUNE each coefficient once
+-- playtested. No longer includes a Banishment-bracket term — Banishment
+-- difficulty scaling is automatic now (see enemy_effective_stats'
+-- depth_mult), not a player choice, so it doesn't get an opt-in reward
+-- bonus on top; its reward already scales via eff_xp/eff_gold directly.
+create or replace function selection_reward_mult(p_pack_size int, p_affix_count int, p_debuff_count int)
 returns numeric
 language sql
 immutable
@@ -1269,8 +1322,7 @@ as $$
   select 1
     + (greatest(0, p_pack_size - 1) * 0.12)
     + (p_affix_count * 0.15)
-    + (p_debuff_count * 0.20)
-    + (p_bracket * 0.08);
+    + (p_debuff_count * 0.20);
 $$;
 
 -- Postgres can't CREATE OR REPLACE a function onto a different return
@@ -1286,6 +1338,12 @@ drop function if exists get_or_spawn_player_enemy(text);
 -- set_encounter_settings deliberately clears the row). Rolls a fresh set of
 -- affixes/debuffs from the player's current sel_* choices and snapshots
 -- them onto player_combat so they stay fixed for this pack's lifetime.
+-- bracket_used (both here and on player_combat itself) now records the
+-- player's Banishment count (profiles.depth) at spawn time rather than a
+-- player-chosen bracket -- kept under its original column/field name to
+-- avoid an unnecessary migration, but it's purely informational now
+-- (enemy_effective_stats reads depth fresh off profiles every time it's
+-- actually needed, not from this snapshot).
 create or replace function get_or_spawn_pack(p_enemy_key text default 'test_rat')
 returns table (
   pack jsonb,
@@ -1327,10 +1385,10 @@ begin
     select coalesce(sum(mod_val(mods, 'hp_pct')), 0) into hp_pct
       from affix_defs where key in (select jsonb_array_elements_text(new_affix_keys));
 
-    new_pack := apply_hp_mod(roll_pack(p_enemy_key, p.sel_pack_size, p.sel_banishment_bracket), hp_pct);
+    new_pack := apply_hp_mod(roll_pack(p_enemy_key, p.sel_pack_size, p.depth), hp_pct);
 
     insert into player_combat (profile_id, enemy_key_used, pack, affix_keys, debuff_keys, bracket_used, updated_at)
-      values (auth.uid(), p_enemy_key, new_pack, new_affix_keys, new_debuff_keys, p.sel_banishment_bracket, now())
+      values (auth.uid(), p_enemy_key, new_pack, new_affix_keys, new_debuff_keys, p.depth, now())
     on conflict (profile_id) do update set
       enemy_key_used = excluded.enemy_key_used,
       pack = excluded.pack,
@@ -1351,15 +1409,22 @@ begin
 end;
 $$;
 
--- Validates and applies the player's difficulty-bracket selections. Always
--- clears the in-progress pack so the NEXT strike spawns fresh under the new
+-- Postgres can't CREATE OR REPLACE a function with a shorter parameter list
+-- — a project that already ran the old 4-arg (with p_banishment_bracket)
+-- version needs it dropped first. Safe no-op on a project that's never
+-- defined it.
+drop function if exists set_encounter_settings(int, int, int, int);
+
+-- Validates and applies the player's difficulty selections. Always clears
+-- the in-progress pack so the NEXT strike spawns fresh under the new
 -- settings, rather than a live pack silently drifting out of sync with what
--- the fields now say.
+-- the fields now say. No Banishment-bracket param anymore -- that
+-- difficulty knob is gone; see enemy_effective_stats()'s depth_mult for how
+-- Banishment count now scales difficulty automatically instead.
 create or replace function set_encounter_settings(
   p_pack_size int,
   p_affix_count int,
-  p_debuff_count int,
-  p_banishment_bracket int
+  p_debuff_count int
 )
 returns profiles
 language plpgsql
@@ -1396,19 +1461,11 @@ begin
   if p_debuff_count not between 0 and max_debuff_count then
     raise exception 'debuff count must be between 0 and %', max_debuff_count;
   end if;
-  -- deliberately uncapped upward: pushing this arbitrarily high above your
-  -- own Depth is a real, unbounded risk/reward lever (see bracket_mult in
-  -- enemy_effective_stats -- it keeps climbing, just ever more slowly),
-  -- not something that should ever hit an artificial ceiling.
-  if p_banishment_bracket < 0 then
-    raise exception 'banishment bracket cannot be negative';
-  end if;
 
   update profiles set
     sel_pack_size = p_pack_size,
     sel_affix_count = p_affix_count,
-    sel_debuff_count = p_debuff_count,
-    sel_banishment_bracket = p_banishment_bracket
+    sel_debuff_count = p_debuff_count
   where id = p.id
   returning * into p;
 
@@ -1556,7 +1613,7 @@ begin
   -- rather than in compute_damage() since attack_speed drives the pack
   -- budget, not a per-hit damage roll.
   rounds_soft_budget := greatest(1, round(base_rounds * p.attack_speed * (1 + mod_val(player_mods, 'attack_speed_pct') / 100.0))::int);
-  reward_mult := selection_reward_mult(p.sel_pack_size, p.sel_affix_count, p.sel_debuff_count, p.sel_banishment_bracket);
+  reward_mult := selection_reward_mult(p.sel_pack_size, p.sel_affix_count, p.sel_debuff_count);
 
   -- Speed -> initiative (compared per-round against the pack below, since
   -- who's "faster" shifts as members die) and Speed -> evasion (a flat,
@@ -1568,7 +1625,7 @@ begin
   -- it the same way multi_strike_flat/crit_chance_flat already do — it
   -- doesn't need to be Speed alone forever, just today.
   cur_player_speed := greatest(1, p.speed * (1 + mod_val(player_mods, 'speed_pct') / 100.0));
-  cur_player_evasion_pct := least(50, greatest(0, p.speed + mod_val(player_mods, 'evasion_flat')));
+  cur_player_evasion_pct := least(25, greatest(0, p.speed + mod_val(player_mods, 'evasion_flat')));
 
   cur_pack := pc.pack;
   -- a self-imposed hp_pct debuff temporarily lowers the player's effective
@@ -1634,7 +1691,7 @@ begin
         ));
         total_deaths := total_deaths + 1;
         cur_player_hp := cur_player_max_hp;
-        cur_pack := apply_hp_mod(roll_pack(p_enemy_key, p.sel_pack_size, p.sel_banishment_bracket), hp_pct);
+        cur_pack := apply_hp_mod(roll_pack(p_enemy_key, p.sel_pack_size, p.depth), hp_pct);
         exit exchanges;
       end if;
     end if;
@@ -1646,7 +1703,7 @@ begin
 
     if target_idx is not null then
       member := cur_pack -> target_idx;
-      select * into hit from compute_damage(p.attack, p.crit, (member->>'defense')::numeric, player_mods, enemy_mods);
+      select * into hit from compute_damage(p.attack, p.crit, (member->>'defense')::numeric, player_mods, enemy_mods, p.crit_damage);
       cur_pack := jsonb_set(cur_pack, array[target_idx::text, 'hp'],
         to_jsonb(greatest(0, (member->>'hp')::int - hit.dmg)));
       total_damage := total_damage + hit.dmg;
@@ -1664,7 +1721,7 @@ begin
           where (elem->>'hp')::int > 0;
         if target_idx is not null then
           member := cur_pack -> target_idx;
-          select * into hit from compute_damage(p.attack, p.crit, (member->>'defense')::numeric, player_mods, enemy_mods);
+          select * into hit from compute_damage(p.attack, p.crit, (member->>'defense')::numeric, player_mods, enemy_mods, p.crit_damage);
           cur_pack := jsonb_set(cur_pack, array[target_idx::text, 'hp'],
             to_jsonb(greatest(0, (member->>'hp')::int - hit.dmg)));
           total_damage := total_damage + hit.dmg;
@@ -1686,6 +1743,13 @@ begin
       pack_xp := round(pack_xp * reward_mult);
       pack_gold := round(pack_gold * reward_mult);
 
+      -- Victory heal: 10% of this fight's effective max HP, on top of
+      -- xp/gold -- rewards clearing a pack with a bit of breathing room
+      -- before the next one, short of the full heal a death gives. Applied
+      -- before logging so the round's reported player_hp already reflects
+      -- it.
+      cur_player_hp := least(cur_player_max_hp, cur_player_hp + round(cur_player_max_hp * 0.10)::int);
+
       round_log := round_log || jsonb_build_array(jsonb_build_object(
         'hits', round_hits, 'pack', cur_pack,
         'player_hp', cur_player_hp, 'player_max_hp', cur_player_max_hp,
@@ -1699,7 +1763,7 @@ begin
       -- roll the next pack now so it's ready and waiting, but STOP here —
       -- this tick's fight is over the moment the pack clears, even with
       -- rounds left in the budget. Fighting it is next tick's job.
-      cur_pack := apply_hp_mod(roll_pack(p_enemy_key, p.sel_pack_size, p.sel_banishment_bracket), hp_pct);
+      cur_pack := apply_hp_mod(roll_pack(p_enemy_key, p.sel_pack_size, p.depth), hp_pct);
       exit exchanges;
     end if;
 
@@ -1720,9 +1784,10 @@ begin
         -- not a silent reset. Full heal (to this fight's effective cap)
         -- and a fresh pack, same selections/affixes/debuffs. DEATH PENALTY:
         -- 25% of current gold, 10% of current xp — enough to make pushing
-        -- Number of Banishments/pack size/affixes past a comfortable margin
-        -- a real risk, not just a free way to farm harder content until it
-        -- works. Off p.gold/p.xp as they stood when this call started (a
+        -- pack size/affixes/debuffs past a comfortable margin a real risk,
+        -- not just a free way to farm harder content until it works
+        -- (Banishment difficulty scales automatically now, not something
+        -- pushed). Off p.gold/p.xp as they stood when this call started (a
         -- death tick never also earns a kill's reward in the same call —
         -- see the single-event-per-tick banner comment above — so those are
         -- still the player's true current totals at the moment they died).
@@ -1743,7 +1808,7 @@ begin
 
         total_deaths := total_deaths + 1;
         cur_player_hp := cur_player_max_hp;
-        cur_pack := apply_hp_mod(roll_pack(p_enemy_key, p.sel_pack_size, p.sel_banishment_bracket), hp_pct);
+        cur_pack := apply_hp_mod(roll_pack(p_enemy_key, p.sel_pack_size, p.depth), hp_pct);
         exit exchanges;
       end if;
     end if;
@@ -2562,8 +2627,9 @@ on conflict (key) do nothing;
 -- when an enemy hits the player and as p_def_mods when the player hits an
 -- enemy — see strike_enemy()), so they're restricted to the keys
 -- compute_damage()/apply_hp_mod() actually read: attack_pct, attack_flat,
--- damage_pct, damage_reduction_pct, defense_pct, crit_chance_flat, hp_pct.
--- multi_strike_flat/attack_speed_pct/evasion_flat/speed_pct are
+-- damage_pct, damage_reduction_pct, defense_pct, crit_chance_flat,
+-- crit_damage_flat, hp_pct. multi_strike_flat/attack_speed_pct/evasion_flat/
+-- speed_pct are
 -- deliberately never used on an affix — strike_enemy() only ever reads
 -- those four out of player_mods (see the class-bonus comment below), so on
 -- an affix they'd silently do nothing. Values below are tuned against the
@@ -2664,7 +2730,7 @@ on conflict (key) do update set name = excluded.name, description = excluded.des
 -- inside compute_damage(), so it's read there explicitly rather than via
 -- compute_damage's p_atk_mods. attack_speed_pct works the same way, read
 -- directly in strike_enemy() to scale the pack round budget. evasion_flat
--- (added on top of the player's raw Speed, both hard-capped at 50%
+-- (added on top of the player's raw Speed, both hard-capped at 25%
 -- combined) and speed_pct (a % bonus to Speed itself, feeding both
 -- evasion and initiative) are the newest two of this "read directly in
 -- strike_enemy(), not via compute_damage()" family — see

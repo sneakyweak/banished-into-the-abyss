@@ -160,7 +160,7 @@
           </script>
           <h2 id="char-name">—</h2>
           <ul class="stat-list">
-            <li><span class="stat-label" data-tooltip="How many times you've Banished. Also sets how much of your attack/defense/max HP carries into your next life -- the more Banishments, the more you keep.">Banishments</span><span id="stat-depth">0</span></li>
+            <li><span class="stat-label" data-tooltip="How many times you've Banished. Sets how much of your attack/defense/max HP carries into your next life -- the more Banishments, the more you keep -- and also makes every enemy you fight slightly tougher (and worth slightly more), forever.">Banishments</span><span id="stat-depth">0</span></li>
             <li><span class="stat-label" data-tooltip="Your character's current level, driven by Experience (see the bar below). Resets to 1 every time you Banish.">Level</span><span id="stat-level">1</span></li>
             <li><span class="stat-label" data-tooltip="Everyday currency -- earned constantly from idle income and fights, spent on gear/consumables once those exist. Resets to 0 on Banishment.">Gold</span><span id="stat-gold">0</span></li>
           </ul>
@@ -178,24 +178,26 @@
             <li><span class="stat-label" data-tooltip="How hard you hit. Combined with the defender's Defense to work out mitigation, then further boosted by your class bonus and (eventually) gear.">Power</span><span id="stat-power">0</span></li>
             <li><span class="stat-label" data-tooltip="Reduces incoming damage. Mitigation is a ratio -- Defense / (Defense + attacker's Power) -- so it scales forever without ever hard-capping.">Defense</span><span id="stat-defense">0</span></li>
             <li><span class="stat-label" data-tooltip="How many rounds you get each time you act (Refresh Actions / idle tick). Higher Attack Speed means more swings per fight.">Attack Speed</span><span id="stat-attack-speed">0</span></li>
-            <li><span class="stat-label" data-tooltip="Chance for any hit -- yours or an enemy's -- to deal double damage.">Crit</span><span id="stat-crit">0%</span></li>
+            <li><span class="stat-label" data-tooltip="Chance for any hit -- yours or an enemy's -- to land as a critical strike.">Crit Chance</span><span id="stat-crit">0%</span></li>
+            <li><span class="stat-label" data-tooltip="Bonus damage a critical strike deals on top of a normal hit. 100% means a crit deals double damage.">Crit Damage</span><span id="stat-crit-damage">0%</span></li>
             <li><span class="stat-label" data-tooltip="Chance for a bonus extra swing on your turn, cascading to the next still-alive enemy in the pack.">Multi Strike</span><span id="stat-multi-strike">0%</span></li>
             <li><span class="stat-label" data-tooltip="Decides who swings first each round -- compared against the current pack's average Speed, recomputed every round as members die. Ties go to you. Also drives Evasion below.">Speed</span><span id="stat-speed">0</span></li>
-            <li><span class="stat-label" data-tooltip="Your chance to dodge an enemy hit entirely -- 0 damage, not even a graze. 1 Speed = 1% Evasion, hard-capped at 50% total.">Evasion</span><span id="stat-evasion">0%</span></li>
+            <li><span class="stat-label" data-tooltip="Your chance to dodge an enemy hit entirely -- 0 damage, not even a graze. 1 Speed = 1% Evasion, hard-capped at 25% total.">Evasion</span><span id="stat-evasion">0%</span></li>
           </ul>
           <div class="panel-divider"></div>
-          <h3 class="panel-subtitle affix-slots-title" data-tooltip="Reserved slots for bonus effects gear will eventually roll -- the same affixes packs can already spawn with, just permanently equipped instead of fight-only.">Additional Affixes</h3>
+          <h3 class="panel-subtitle" data-tooltip="Reserved slots for bonus effects gear will eventually roll -- the same affixes packs can already spawn with, just permanently equipped instead of fight-only.">Additional Affixes</h3>
           <!-- Reserved slots for affixes gear will eventually roll (same
                vocabulary as the pack-combat affixes/debuffs in schema.sql —
-               see class_defs/affix_defs there). Not wired up yet; these
-               just hold the space out so the panel doesn't visibly change
-               shape once gear grants the first one. -->
-          <div class="equip-grid affix-slots-grid">
-            <div class="equip-slot"><span class="equip-slot-label">Affix</span></div>
-            <div class="equip-slot"><span class="equip-slot-label">Affix</span></div>
-            <div class="equip-slot"><span class="equip-slot-label">Affix</span></div>
-            <div class="equip-slot"><span class="equip-slot-label">Affix</span></div>
-          </div>
+               see class_defs/affix_defs there). Not wired up yet; styled as
+               stat-list rows to match Combat Stats above rather than the
+               equipment panel's dashed slot boxes, since these read as
+               stats, not gear. -->
+          <ul class="stat-list affix-list">
+            <li><span class="stat-label">Affix</span><span>—</span></li>
+            <li><span class="stat-label">Affix</span><span>—</span></li>
+            <li><span class="stat-label">Affix</span><span>—</span></li>
+            <li><span class="stat-label">Affix</span><span>—</span></li>
+          </ul>
         </aside>
       </div>
 
@@ -241,15 +243,20 @@
           <div class="tick-bar"><div id="tick-bar-fill" class="tick-fill"></div></div>
           <button id="btn-refresh-actions">Refresh Actions (<span id="stat-actions">0</span>)</button>
 
-          <!-- Difficulty-bracket selections: each trades a harder fight for
-               a proportionally bigger reward (see selection_reward_mult in
+          <!-- Difficulty selections: each trades a harder fight for a
+               proportionally bigger reward (see selection_reward_mult in
                schema.sql). Plain number inputs (typed, not a dropdown) --
                min/max/value kept in sync by app.js's renderEncounterSettings();
                changing any of them respawns a fresh pack under the new
-               settings. -->
+               settings. There used to be a 4th field here ("Number of
+               Banishments") letting a player choose a difficulty bracket
+               separate from their real Banishment count -- removed: your
+               Banishments (profiles.depth) now scale enemy difficulty (and
+               reward) automatically, no selection needed -- see
+               enemy_effective_stats()'s depth_mult in schema.sql. -->
           <div class="encounter-settings">
             <label class="encounter-setting">
-              <span class="setting-label-text">Number of Affixes <span class="setting-max" id="max-affix-count"></span></span>
+              <span class="setting-label-text">Number of Enemy Affixes <span class="setting-max" id="max-affix-count"></span></span>
               <input type="number" id="sel-affix-count" min="0" max="5" step="1" inputmode="numeric" />
             </label>
             <label class="encounter-setting">
@@ -259,10 +266,6 @@
             <label class="encounter-setting">
               <span class="setting-label-text">Player Debuffs <span class="setting-max" id="max-debuff-count"></span></span>
               <input type="number" id="sel-debuff-count" min="0" max="4" step="1" inputmode="numeric" />
-            </label>
-            <label class="encounter-setting">
-              <span class="setting-label-text">Number of Banishments <span class="setting-max" id="max-banishment-bracket"></span></span>
-              <input type="number" id="sel-banishment-bracket" min="0" max="0" step="1" inputmode="numeric" />
             </label>
           </div>
         </section>
