@@ -118,15 +118,17 @@
           <h2 class="panel-title">Current Battle</h2>
           <div class="battle-arena">
             <div class="battle-side battle-player">
-              <img id="battle-player-portrait" class="battle-portrait" src="img/class-warrior-avatar.jpg" alt="" />
               <div class="battle-name" id="battle-player-name">—</div>
               <div class="battle-sub">Lv <span id="battle-player-level">1</span></div>
               <div class="hp-bar"><div id="player-hp-fill" class="hp-fill hp-fill-player"></div></div>
               <div id="player-hp-text" class="battle-hp-text"></div>
             </div>
-            <div class="battle-vs">VS</div>
+            <!-- Placeholder for future per-mob art; swap the icon for an
+                 <img id="battle-mob-art"> once artwork exists per enemy key. -->
+            <div class="battle-mob-slot" id="battle-mob-slot">
+              <span class="battle-mob-placeholder-icon">?</span>
+            </div>
             <div class="battle-side battle-enemy">
-              <span class="avatar-glyph enemy-glyph">🐀</span>
               <div class="battle-name" id="enemy-name">—</div>
               <div class="battle-sub">&nbsp;</div>
               <div class="hp-bar"><div id="enemy-hp-fill" class="hp-fill"></div></div>
@@ -134,6 +136,9 @@
             </div>
           </div>
           <p id="tick-log" class="log battle-summary"></p>
+          <!-- Running session totals (damage dealt/taken, kills, deaths, and
+               whatever else gets tracked later — crits, statuses, etc.). -->
+          <p id="battle-stats-summary" class="log battle-stats-summary"></p>
 
           <div class="tick-bar"><div id="tick-bar-fill" class="tick-fill"></div></div>
           <button id="btn-refresh-actions">Refresh Actions (<span id="stat-actions">0</span>)</button>
@@ -294,10 +299,10 @@
        brand-new visitor never sees it — only a browser that previously
        stored a different version. -->
   <script>
-    window.APP_VERSION = "9";
+    window.APP_VERSION = "10";
     window.PATCH_NOTES = [
-      "Fixed the update popup's 2-minute countdown closing too early.",
-      "Removed the detailed combat log — battle results now show as a short summary under the battle portraits.",
+      "Current Battle now tracks running session totals (damage dealt/taken, kills, deaths) below the summary line.",
+      "Removed the player portrait, VS divider, and enemy icon from Current Battle — replaced with a placeholder art slot for upcoming mob artwork.",
     ];
   </script>
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js"></script>

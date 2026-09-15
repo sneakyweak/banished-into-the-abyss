@@ -11,6 +11,11 @@ const state = {
   myRole: null,       // this player's role in state.guild: 'leader' | 'officer' | 'member' | null
   members: [],
   enemy: null,         // { enemy_key, enemy_hp, name, max_hp, attack, xp_reward, gold_reward }
+  // Running totals for this browser session (resets on page load — not
+  // persisted server-side). Extensible: add more fields here (crits landed,
+  // status effects applied/received, etc.) as those get tracked, and add a
+  // matching line to renderBattleStats() below.
+  battleStats: { damageDealt: 0, damageTaken: 0, kills: 0, deaths: 0 },
   activeTab: "global", // 'global' | 'guild' | 'whispers'
   chatChannelSub: null,
   whisperSub: null,
@@ -331,6 +336,7 @@ async function enterGame(user) {
   await loadGuildMembership();
   await loadInventory();
   await loadEnemy();
+  renderBattleStats();
   await loadChatHistory("global");
   subscribeChat("global");
   subscribeWhispers();
@@ -381,8 +387,6 @@ function renderProfile() {
   const className = p.class ? p.class.charAt(0).toUpperCase() + p.class.slice(1) : "Wanderer";
   $("avatar-portrait").src = portraitSrc;
   $("avatar-portrait").alt = className;
-  $("battle-player-portrait").src = portraitSrc;
-  $("battle-player-portrait").alt = className;
 
   $("stat-depth").textContent = p.depth;
   $("stat-level").textContent = p.level;
@@ -446,6 +450,18 @@ function renderBattleHp(enemyName, enemyHp, enemyMaxHp, playerHp, playerMaxHp) {
   $("player-hp-text").textContent = `${playerHp} / ${playerMaxHp} HP`;
 }
 
+// Renders state.battleStats (running session totals) under the per-tick
+// summary line. Add a new field to state.battleStats and a matching
+// " • Label: value" clause here whenever a new stat/status gets tracked.
+function renderBattleStats() {
+  const s = state.battleStats;
+  const el = $("battle-stats-summary");
+  if (!el) return;
+  el.textContent =
+    `Session totals — Dmg dealt: ${s.damageDealt} • Dmg taken: ${s.damageTaken}` +
+    ` • Kills: ${s.kills} • Deaths: ${s.deaths}`;
+}
+
 // Fired automatically once per idle tick (see doTick() below) instead of
 // from a button. Costs a flat 1 action no matter what — but each call
 // resolves one or more whole BATTLES (rounds driven by the player's Attack
@@ -478,6 +494,21 @@ async function autoStrikeEnemy() {
   if (!row) return null;
 
   const log = Array.isArray(row.rounds_log) ? row.rounds_log : [];
+
+  // Tally running session totals (see state.battleStats). damage_dealt,
+  // kills and deaths come straight from the server; damage taken isn't its
+  // own return column, so it's summed here from this call's rounds_log
+  // (every enemy hit landed this call, whether or not it played back).
+  const damageTakenThisCall = log.reduce((sum, entry) => {
+    const hits = Array.isArray(entry.hits) ? entry.hits : [];
+    return sum + hits.filter((h) => h.source === "enemy").reduce((s, h) => s + (h.dmg || 0), 0);
+  }, 0);
+  state.battleStats.damageDealt += row.damage_dealt || 0;
+  state.battleStats.damageTaken += damageTakenThisCall;
+  state.battleStats.kills += row.kills || 0;
+  state.battleStats.deaths += row.deaths || 0;
+  renderBattleStats();
+
   if (log.length > 0) {
     // most rounds get a quick beat; a kill/death gets a longer one so the
     // outcome actually registers. Worst case (every round an event, on the

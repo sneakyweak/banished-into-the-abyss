@@ -235,14 +235,6 @@ body {
   display: block;
 }
 
-.battle-portrait {
-  width: 64px;
-  height: 64px;
-  object-fit: cover;
-  border-radius: 8px;
-  border: 1px solid var(--border);
-}
-
 .auth-box { max-width: 340px; margin: 0 auto 40px; display: flex; flex-direction: column; gap: 8px; }
 .auth-box input {
   background: #0c0a10; border: 1px solid var(--border); color: var(--text);
@@ -473,16 +465,6 @@ button:disabled { opacity: 0.4; cursor: not-allowed; }
   width: 200px;
   min-width: 0;
 }
-.battle-side .avatar-glyph {
-  width: 64px;
-  height: 64px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-size: 2rem;
-  line-height: 1;
-}
-.enemy-glyph { color: var(--danger); text-shadow: 0 0 14px rgba(224, 82, 82, 0.55); }
 .battle-name {
   font-weight: bold;
   max-width: 100%;
@@ -491,12 +473,25 @@ button:disabled { opacity: 0.4; cursor: not-allowed; }
   white-space: nowrap;
 }
 .battle-sub { font-size: 0.75rem; color: var(--dim); }
-.battle-vs {
-  font-size: 0.8rem;
-  letter-spacing: 2px;
-  color: var(--dim);
-  padding: 0 4px;
+
+/* Center art slot — placeholder until per-mob art exists. Swap
+   .battle-mob-placeholder-icon for an <img> with object-fit: cover once
+   real artwork is dropped in; the slot's size/border stays the same. */
+.battle-mob-slot {
+  width: 84px;
+  height: 84px;
   flex: 0 0 auto;
+  border: 1px dashed var(--border);
+  border-radius: 8px;
+  background: #0c0a10;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.battle-mob-placeholder-icon {
+  font-size: 1.8rem;
+  color: var(--dim);
+  opacity: 0.6;
 }
 .battle-side .hp-bar { width: 100%; }
 .battle-hp-text { font-size: 0.75rem; color: var(--dim); }
@@ -546,7 +541,8 @@ button:disabled { opacity: 0.4; cursor: not-allowed; }
 .chat-log .msg.system { color: var(--dim); font-style: italic; }
 .chat-log .msg.whisper { color: #f0c674; }
 
-.battle-summary { margin-top: 2px; margin-bottom: 14px; min-height: 1.2em; }
+.battle-summary { margin-top: 2px; margin-bottom: 2px; min-height: 1.2em; }
+.battle-stats-summary { margin-top: 0; margin-bottom: 14px; min-height: 1.2em; font-size: 0.78rem; color: var(--dim); }
 
 #chat-form { display: flex; gap: 8px; margin-top: 8px; }
 #chat-input {
