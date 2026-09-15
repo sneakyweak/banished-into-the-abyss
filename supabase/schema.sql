@@ -24,7 +24,7 @@ create table if not exists profiles (
   depth            int not null default 0,         -- prestige tier ("how deep")
   hp               int not null default 10,         -- current hp (solo combat)
   max_hp           int not null default 10,
-  attack           int not null default 10,
+  attack           int not null default 1,
   defense          int not null default 5,
   actions          int not null default 3000,       -- spendable action points
   max_actions      int not null default 3000,
@@ -88,9 +88,30 @@ alter table profiles add column if not exists abyssal_prowess bigint not null de
 -- these four are new. Gear-driven, so they sit at these defaults until an
 -- items/relics system that grants them exists.
 alter table profiles add column if not exists attack_speed numeric not null default 1.0;
-alter table profiles add column if not exists crit numeric not null default 5;
+alter table profiles add column if not exists crit numeric not null default 0;
 alter table profiles add column if not exists multi_strike numeric not null default 0;
-alter table profiles add column if not exists speed int not null default 10;
+alter table profiles add column if not exists speed int not null default 1;
+
+-- base stat rebalance: Power (attack) 10 -> 1, Crit 5% -> 0%, Speed 10 -> 1
+-- (a deliberate difficulty change). Same "add column if not exists is a
+-- no-op on an already-deployed table" trap as hp above — the column
+-- defaults above only take effect for a table created fresh by this file,
+-- so the actual default has to be changed explicitly for a project that's
+-- already deployed.
+alter table profiles alter column attack set default 1;
+alter table profiles alter column crit set default 0;
+alter table profiles alter column speed set default 1;
+
+-- retroactively apply the new baseline to any EXISTING character still at
+-- the old untouched defaults. Guarded per-column (not all three at once)
+-- so a character that's, say, banished and picked up bonus attack but
+-- never touched crit/speed still gets those two reset. Never touches a
+-- stat that's already moved off its old default (e.g. attack raised via
+-- Banishment retention); safe to re-run since those rows no longer match
+-- after the first pass.
+update profiles set attack = 1 where attack = 10;
+update profiles set crit = 0 where crit = 5;
+update profiles set speed = 1 where speed = 10;
 
 create table if not exists guilds (
   id          uuid primary key default gen_random_uuid(),
@@ -750,11 +771,14 @@ begin
       end if;
 
       if cur_enemy_hp <= 0 then
-        -- battle resolved: the enemy died
+        -- battle resolved: the enemy died. The player's hp CARRIES OVER
+        -- (no free heal on a kill) — a kill fully resolves within the same
+        -- RPC call as the rest of the fight, so healing to full here made
+        -- the player's hp bar snap back to full on almost every tick and
+        -- never visibly drain. Only an actual death (below) resets it.
         total_kills := total_kills + 1;
         total_xp := total_xp + stats.eff_xp;
         total_gold := total_gold + stats.eff_gold;
-        cur_player_hp := p.max_hp; -- victor heals up before the next encounter
 
         cur_tier := roll_enemy_tier();
         select * into stats from enemy_effective_stats(p_enemy_key, cur_tier);
@@ -834,7 +858,7 @@ declare
   retain_pct numeric;      -- fraction, e.g. 0.0025 for 0.25%
   display_pct numeric;     -- same tier, as the percent number shown to players
   prowess_gain bigint;
-  base_attack int := 10;   -- TUNE: matches profiles.attack's default for a fresh character
+  base_attack int := 1;    -- TUNE: matches profiles.attack's default for a fresh character
   base_defense int := 5;   -- TUNE: matches profiles.defense's default
   base_max_hp int := 10;   -- TUNE: matches profiles.max_hp's default
   new_attack int;
