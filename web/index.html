@@ -52,22 +52,22 @@
         <button type="button" class="class-card" data-class="warrior">
           <img src="img/class-warrior-full.jpg" alt="Warrior" />
           <span class="class-name">Warrior</span>
-          <span class="class-bonus">+5% HP<br />+5% Defense<br />+5% Power</span>
+          <span class="class-bonus">+5% HP<br />+5% Defense<br />+5% Power<br />-25% Speed</span>
         </button>
         <button type="button" class="class-card" data-class="archer">
           <img src="img/class-archer-full.jpg" alt="Archer" />
           <span class="class-name">Archer</span>
-          <span class="class-bonus">+10% Crit<br />+10% Power<br />+5% Attack Speed</span>
+          <span class="class-bonus">+10% Crit<br />+10% Power<br />+5% Attack Speed<br />-30% Defense</span>
         </button>
         <button type="button" class="class-card" data-class="magi">
           <img src="img/class-magi-full.jpg" alt="Magi" />
           <span class="class-name">Magi</span>
-          <span class="class-bonus">+10% Multi Strike<br />+10% Crit<br />+5% Power<br />+5% HP</span>
+          <span class="class-bonus">+10% Multi Strike<br />+10% Crit<br />+5% Power<br />+5% HP<br />-40% Defense</span>
         </button>
         <button type="button" class="class-card" data-class="striker">
           <img src="img/class-striker-full.jpg" alt="Striker" />
           <span class="class-name">Striker</span>
-          <span class="class-bonus">+20% Multi Strike<br />+20% Crit<br />+5% Attack Speed</span>
+          <span class="class-bonus">+20% Multi Strike<br />+20% Crit<br />+5% Attack Speed<br />-40% Defense</span>
         </button>
       </div>
     </div>
@@ -416,22 +416,22 @@
           <button type="button" class="class-card" data-class="warrior">
             <img src="img/class-warrior-full.jpg" alt="Warrior" />
             <span class="class-name">Warrior</span>
-            <span class="class-bonus">+5% HP<br />+5% Defense<br />+5% Power</span>
+            <span class="class-bonus">+5% HP<br />+5% Defense<br />+5% Power<br />-25% Speed</span>
           </button>
           <button type="button" class="class-card" data-class="archer">
             <img src="img/class-archer-full.jpg" alt="Archer" />
             <span class="class-name">Archer</span>
-            <span class="class-bonus">+10% Crit<br />+10% Power<br />+5% Attack Speed</span>
+            <span class="class-bonus">+10% Crit<br />+10% Power<br />+5% Attack Speed<br />-30% Defense</span>
           </button>
           <button type="button" class="class-card" data-class="magi">
             <img src="img/class-magi-full.jpg" alt="Magi" />
             <span class="class-name">Magi</span>
-            <span class="class-bonus">+10% Multi Strike<br />+10% Crit<br />+5% Power<br />+5% HP</span>
+            <span class="class-bonus">+10% Multi Strike<br />+10% Crit<br />+5% Power<br />+5% HP<br />-40% Defense</span>
           </button>
           <button type="button" class="class-card" data-class="striker">
             <img src="img/class-striker-full.jpg" alt="Striker" />
             <span class="class-name">Striker</span>
-            <span class="class-bonus">+20% Multi Strike<br />+20% Crit<br />+5% Attack Speed</span>
+            <span class="class-bonus">+20% Multi Strike<br />+20% Crit<br />+5% Attack Speed<br />-40% Defense</span>
           </button>
         </div>
       </div>
@@ -502,10 +502,24 @@
        into this new per-version structure. PATCH_NOTES must stay valid,
        trailing-comma-free JSON (double-quoted keys/strings) at every
        nesting level -- app.js's parsePatchNotes() extracts and JSON.parses
-       this literal straight out of a fetched copy of this file. -->
+       this literal straight out of a fetched copy of this file.
+
+       Default increment: +0.001 per shipped patch (e.g. 0.001 -> 0.002),
+       whether the changes are player-facing or backend/bugfix-only --
+       every shipped round gets its own version and its own PATCH_NOTES
+       entry, full stop. Only deviate (a MINOR/MAJOR bump, e.g. 0.010 or
+       0.100) if the player explicitly asks for a bigger jump for that
+       round. -->
   <script>
-    window.APP_VERSION = "0.001";
+    window.APP_VERSION = "0.002";
     window.PATCH_NOTES = [
+      {
+        "version": "0.002",
+        "notes": [
+          "Class balance: every class now trades something away for its bonuses instead of being a pure upgrade. Warrior: -25% Speed. Archer: -30% Defense. Magi: -40% Defense. Striker: -40% Defense.",
+          "Fixed a bug where staying logged in for a while (e.g. an hourly session refresh) could throw a console error and break incoming Whispers until you reloaded the page."
+        ]
+      },
       {
         "version": "0.001",
         "notes": [

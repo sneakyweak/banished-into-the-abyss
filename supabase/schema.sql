@@ -2755,18 +2755,21 @@ on conflict (key) do update set name = excluded.name, description = excluded.des
 -- evasion and initiative) are the newest two of this "read directly in
 -- strike_enemy(), not via compute_damage()" family — see
 -- cur_player_evasion_pct/cur_player_speed there.
--- Every class bonus below is intentionally a POSITIVE percentage only — no
--- class carries a downside. As gear/Banishment later push the underlying
--- base stats up, each class's flat percentages become correspondingly
--- stronger in absolute terms with no extra work, which is the whole point
--- of doing this as a percent modifier rather than a fixed bonus.
+-- Each class now also carries a permanent drawback (same modifier bundle,
+-- just a negative entry alongside the positives) so no class is a strictly
+-- free upgrade over the others -- every kit trades something away for its
+-- strengths. As gear/Banishment later push the underlying base stats up,
+-- each class's flat percentages (positive AND negative) become
+-- correspondingly stronger in absolute terms with no extra work, which is
+-- the whole point of doing this as a percent modifier rather than a fixed
+-- bonus/penalty.
 insert into class_defs (key, name, description, mods) values
-  ('warrior', 'Warrior', '+5% HP, +5% Defense, +5% Power',
-    '{"hp_pct": 5, "defense_pct": 5, "attack_pct": 5}'::jsonb),
-  ('archer',  'Archer',  '+10% Crit, +10% Power, +5% Attack Speed',
-    '{"crit_chance_flat": 10, "attack_pct": 10, "attack_speed_pct": 5}'::jsonb),
-  ('magi',    'Magi',    '+10% Multi Strike, +10% Crit, +5% Power, +5% HP',
-    '{"multi_strike_flat": 10, "crit_chance_flat": 10, "attack_pct": 5, "hp_pct": 5}'::jsonb),
-  ('striker', 'Striker', '+20% Multi Strike, +20% Crit, +5% Attack Speed',
-    '{"multi_strike_flat": 20, "crit_chance_flat": 20, "attack_speed_pct": 5}'::jsonb)
+  ('warrior', 'Warrior', '+5% HP, +5% Defense, +5% Power, -25% Speed',
+    '{"hp_pct": 5, "defense_pct": 5, "attack_pct": 5, "speed_pct": -25}'::jsonb),
+  ('archer',  'Archer',  '+10% Crit, +10% Power, +5% Attack Speed, -30% Defense',
+    '{"crit_chance_flat": 10, "attack_pct": 10, "attack_speed_pct": 5, "defense_pct": -30}'::jsonb),
+  ('magi',    'Magi',    '+10% Multi Strike, +10% Crit, +5% Power, +5% HP, -40% Defense',
+    '{"multi_strike_flat": 10, "crit_chance_flat": 10, "attack_pct": 5, "hp_pct": 5, "defense_pct": -40}'::jsonb),
+  ('striker', 'Striker', '+20% Multi Strike, +20% Crit, +5% Attack Speed, -40% Defense',
+    '{"multi_strike_flat": 20, "crit_chance_flat": 20, "attack_speed_pct": 5, "defense_pct": -40}'::jsonb)
 on conflict (key) do update set name = excluded.name, description = excluded.description, mods = excluded.mods;

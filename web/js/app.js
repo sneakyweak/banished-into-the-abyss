@@ -350,10 +350,10 @@ const CLASS_PORTRAITS = {
 // the Combat Stats panel below; the actual damage math always reads the
 // live values from class_defs server-side, this is never sent anywhere.
 const CLASS_MODS = {
-  warrior: { hp_pct: 5, attack_pct: 5, defense_pct: 5 },
-  archer: { attack_pct: 10, attack_speed_pct: 5, crit_chance_flat: 10 },
-  magi: { attack_pct: 5, hp_pct: 5, crit_chance_flat: 10, multi_strike_flat: 10 },
-  striker: { attack_speed_pct: 5, crit_chance_flat: 20, multi_strike_flat: 20 },
+  warrior: { hp_pct: 5, attack_pct: 5, defense_pct: 5, speed_pct: -25 },
+  archer: { attack_pct: 10, attack_speed_pct: 5, crit_chance_flat: 10, defense_pct: -30 },
+  magi: { attack_pct: 5, hp_pct: 5, crit_chance_flat: 10, multi_strike_flat: 10, defense_pct: -40 },
+  striker: { attack_speed_pct: 5, crit_chance_flat: 20, multi_strike_flat: 20, defense_pct: -40 },
 };
 
 // Scoped to #class-grid specifically (the auth-screen picker) so it never
@@ -652,7 +652,7 @@ function renderProfile() {
   // p_crit_damage/crit_damage_flat in schema.sql.
   $("stat-crit-damage").textContent = `${p.crit_damage + (classMods.crit_damage_flat || 0)}%`;
   $("stat-multi-strike").textContent = `${p.multi_strike + (classMods.multi_strike_flat || 0)}%`;
-  $("stat-speed").textContent = p.speed;
+  $("stat-speed").textContent = formatStatWithClassPct(p.speed, classMods.speed_pct);
   // Evasion is derived from Speed, not its own profiles column -- mirrors
   // cur_player_evasion_pct in strike_enemy() (1 Speed = 1% Evasion, plus
   // any future evasion_flat mod, hard-capped at 25% total).
