@@ -334,6 +334,17 @@ alter table player_combat add column if not exists affix_keys jsonb not null def
 alter table player_combat add column if not exists debuff_keys jsonb not null default '[]'::jsonb;
 alter table player_combat add column if not exists bracket_used int not null default 0;
 alter table player_combat add column if not exists enemy_key_used text;
+
+-- enemy_key (legacy, unused column above) originally pointed RESTRICT at
+-- enemies(key) -- harmless while the roster only ever grew, but it means
+-- deleting an old enemy row (e.g. retiring/replacing the roster entirely)
+-- would fail with a FK violation if any row here, however old and
+-- unused, still happened to reference that key. Swapped to ON DELETE SET
+-- NULL so the roster can be freely swapped out without that legacy column
+-- silently blocking it.
+alter table player_combat drop constraint if exists player_combat_enemy_key_fkey;
+alter table player_combat add constraint player_combat_enemy_key_fkey
+  foreign key (enemy_key) references enemies(key) on delete set null;
 -- Obsolete now that roll_pack() picks a random enemy PER PACK MEMBER
 -- instead of one enemy for the whole pack (see get_or_spawn_pack()) --
 -- "which single enemy is this pack" stopped being a meaningful question,
@@ -1202,11 +1213,14 @@ begin
     -- weighting yet -- TUNE if some should feel rarer than others later).
     select key into member_enemy_key from enemies
       where min_depth <= p_bracket order by random() limit 1;
-    -- Defensive fallback: should never actually fire (test_rat's min_depth
-    -- 0 row always qualifies), but guarantees this can never come back null
-    -- if the enemies table is ever misconfigured mid-tune.
+    -- Defensive fallback: should never actually fire (the roster always
+    -- has at least one min_depth-0 row), but guarantees this can never
+    -- come back null if the enemies table is ever misconfigured mid-tune.
+    -- Looks up whatever the lowest-min_depth row currently is rather than
+    -- a hardcoded key, since the roster is meant to be freely swappable
+    -- (see the seed data below) without this fallback going stale.
     if member_enemy_key is null then
-      member_enemy_key := 'test_rat';
+      select key into member_enemy_key from enemies order by min_depth, key limit 1;
     end if;
 
     tier := roll_enemy_tier();
@@ -2929,28 +2943,142 @@ insert into items (key, name, description, rarity, item_type, base_value) values
   ('echo_charm',    'Echo Charm',                    'Hums with a voice that isn''t yours.', 'rare', 'trinket', 50)
 on conflict (key) do nothing;
 
--- The mob roster the "Current Battle" panel draws from. Real content now
--- (replacing the single always-on test enemy this used to be) -- roll_pack()
--- picks a random eligible row PER PACK MEMBER (see there), not one enemy
--- for the whole pack, so even a single fight mixes species. Base stats are
--- deliberately kept in the same rough band across the whole roster --
--- min_depth is a variety/flavor gate (what CAN show up), never a power
--- gate (how hard it hits); all real difficulty still comes from tier +
--- depth_mult + spawn variance in enemy_effective_stats(), uniformly, no
--- matter which key got picked. 'test_rat' keeps its original key (existing
--- player_combat rows/history reference it by key inside pack jsonb, not a
--- live FK, but no reason to break it) even though the display name moved
--- on from the dev-placeholder "Test Rat". "on conflict do update" so
--- re-running this file after a numbers/roster tweak actually applies it.
+-- The mob roster the "Current Battle" panel draws from. roll_pack() picks
+-- a random eligible row PER PACK MEMBER (see there), not one enemy for the
+-- whole pack, so even a single fight mixes species. min_depth is a
+-- variety/flavor gate (what CAN show up), never a power gate (how hard it
+-- hits); all real difficulty still comes from tier + depth_mult + spawn
+-- variance in enemy_effective_stats(), uniformly, no matter which key got
+-- picked.
+--
+-- v0.008: the original 8-enemy roster (Abyssal Rat, Rift Skitterling,
+-- Gloomfen Leech, Void Moth, Marrow Hound, Ironshell Grub, Whispering
+-- Husk, Umbral Wraith) is retired outright and replaced with 100 void-
+-- themed mobs, all at min_depth 0 -- every one of them can roll at any
+-- point across the whole level 1-100 journey, not gated behind Banishment
+-- count. That's deliberate: min_depth only ever gates by profiles.depth
+-- (the Banishment counter, shown to players as "Banishments"), which
+-- stays 0 for a character's entire first life -- gating any of this
+-- roster behind depth would've meant it never actually showed up until
+-- well past a first Banishment. Base stats are spread across a handful of
+-- flavor archetypes (swarm motes, vermin, fast skitterlings, bruiser
+-- leeches/oozes, flyers, hounds, tanky grubs, balanced husks, wraiths,
+-- and a higher-ceiling "void-touched" tier) but deliberately kept in the
+-- same rough band as the old roster's average -- same reasoning as
+-- always, this is variety, not a difficulty change. Elite/champion spawns
+-- (roll_enemy_tier(), 10%/5% odds) apply to any of these exactly the same
+-- as before; nothing about the tier system needed to change for this
+-- swap.
+--
+-- The blanket delete first is what actually retires the old 8 rows --
+-- "on conflict do update" below only ever upserts what's IN this list, it
+-- never removes a row that fell out of it. Safe to re-run: the next
+-- roster swap just wipes and reseeds again the same way.
+-- player_combat.enemy_key (the old pre-pack single-enemy column, unused
+-- by current code) has its FK switched to ON DELETE SET NULL above
+-- specifically so this can never fail on a stale legacy reference.
+delete from enemies;
 insert into enemies (key, name, max_hp, attack, defense, xp_reward, gold_reward, speed, min_depth) values
-  ('test_rat',         'Abyssal Rat',      20, 2, 0, 5, 2, 1, 0),
-  ('rift_skitterling', 'Rift Skitterling', 10, 2, 0, 4, 2, 3, 0),
-  ('gloomfen_leech',   'Gloomfen Leech',   14, 4, 0, 6, 3, 1, 0),
-  ('void_moth',        'Void Moth',        16, 2, 0, 6, 3, 3, 1),
-  ('marrow_hound',     'Marrow Hound',     22, 3, 1, 7, 3, 2, 2),
-  ('ironshell_grub',   'Ironshell Grub',   34, 1, 3, 6, 2, 1, 2),
-  ('whispering_husk',  'Whispering Husk',  28, 2, 2, 7, 3, 1, 4),
-  ('umbral_wraith',    'Umbral Wraith',    26, 3, 2, 8, 4, 2, 6)
+  ('void_wisp_void_mote', 'Void Mote', 6, 1, 0, 3, 1, 3, 0),
+  ('void_wisp_flickering_wisp', 'Flickering Wisp', 6, 1, 0, 3, 1, 3, 0),
+  ('void_wisp_static_sprite', 'Static Sprite', 7, 1, 0, 3, 1, 3, 0),
+  ('void_wisp_null_gnat', 'Null Gnat', 7, 1, 0, 3, 1, 3, 0),
+  ('void_wisp_drifting_cinder', 'Drifting Cinder', 8, 1, 0, 3, 1, 3, 0),
+  ('void_wisp_pale_ember', 'Pale Ember', 8, 2, 0, 4, 2, 4, 0),
+  ('void_wisp_static_flicker', 'Static Flicker', 9, 2, 0, 4, 2, 4, 0),
+  ('void_wisp_gloomfly', 'Gloomfly', 9, 2, 0, 4, 2, 4, 0),
+  ('void_wisp_ashen_gnat', 'Ashen Gnat', 10, 2, 0, 4, 2, 4, 0),
+  ('void_wisp_faint_flicker', 'Faint Flicker', 10, 2, 0, 4, 2, 4, 0),
+  ('void_vermin_pit_rat', 'Pit Rat', 12, 2, 0, 4, 2, 1, 0),
+  ('void_vermin_gnawing_vermin', 'Gnawing Vermin', 12, 2, 0, 4, 2, 1, 0),
+  ('void_vermin_rot_vermin', 'Rot Vermin', 13, 2, 0, 4, 2, 1, 0),
+  ('void_vermin_carrion_nibbler', 'Carrion Nibbler', 13, 2, 0, 4, 2, 1, 0),
+  ('void_vermin_bone_mite', 'Bone Mite', 14, 2, 0, 4, 2, 1, 0),
+  ('void_vermin_filth_crawler', 'Filth Crawler', 14, 3, 1, 5, 2, 2, 0),
+  ('void_vermin_maw_rat', 'Maw Rat', 15, 3, 1, 5, 2, 2, 0),
+  ('void_vermin_sump_rat', 'Sump Rat', 15, 3, 1, 5, 2, 2, 0),
+  ('void_vermin_blight_vermin', 'Blight Vermin', 16, 3, 1, 5, 2, 2, 0),
+  ('void_vermin_mange_rat', 'Mange Rat', 16, 3, 1, 5, 2, 2, 0),
+  ('void_skitterling_chitter_fiend', 'Chitter Fiend', 9, 3, 0, 5, 2, 3, 0),
+  ('void_skitterling_rift_crawler', 'Rift Crawler', 9, 3, 0, 5, 2, 3, 0),
+  ('void_skitterling_glass_skitterer', 'Glass Skitterer', 10, 3, 0, 5, 2, 3, 0),
+  ('void_skitterling_needle_stalker', 'Needle Stalker', 10, 3, 0, 5, 2, 3, 0),
+  ('void_skitterling_thorned_skitter', 'Thorned Skitter', 11, 3, 0, 5, 2, 3, 0),
+  ('void_skitterling_razor_strider', 'Razor Strider', 11, 4, 0, 6, 3, 4, 0),
+  ('void_skitterling_spindle_crawler', 'Spindle Crawler', 12, 4, 0, 6, 3, 4, 0),
+  ('void_skitterling_barbed_quill', 'Barbed Quill', 12, 4, 0, 6, 3, 4, 0),
+  ('void_skitterling_quill_skitterling', 'Quill Skitterling', 13, 4, 0, 6, 3, 4, 0),
+  ('void_skitterling_hollow_locust', 'Hollow Locust', 13, 4, 0, 6, 3, 4, 0),
+  ('void_leech_void_leech', 'Void Leech', 14, 4, 0, 6, 3, 1, 0),
+  ('void_leech_bile_leech', 'Bile Leech', 14, 4, 0, 6, 3, 1, 0),
+  ('void_leech_ichor_slug', 'Ichor Slug', 15, 4, 0, 6, 3, 1, 0),
+  ('void_leech_black_ooze', 'Black Ooze', 15, 4, 0, 6, 3, 1, 0),
+  ('void_leech_seep_leech', 'Seep Leech', 16, 4, 0, 6, 3, 1, 0),
+  ('void_leech_marrow_ooze', 'Marrow Ooze', 16, 5, 0, 7, 3, 1, 0),
+  ('void_leech_hollow_leech', 'Hollow Leech', 17, 5, 0, 7, 3, 1, 0),
+  ('void_leech_tar_wretch', 'Tar Wretch', 17, 5, 0, 7, 3, 1, 0),
+  ('void_leech_weeping_ooze', 'Weeping Ooze', 18, 5, 0, 7, 3, 1, 0),
+  ('void_leech_rancid_leech', 'Rancid Leech', 18, 5, 0, 7, 3, 1, 0),
+  ('void_moth_ashwing_moth', 'Ashwing Moth', 14, 2, 0, 5, 2, 3, 0),
+  ('void_moth_cinder_moth', 'Cinder Moth', 14, 2, 0, 5, 2, 3, 0),
+  ('void_moth_umbral_moth', 'Umbral Moth', 15, 2, 0, 5, 2, 3, 0),
+  ('void_moth_hollow_moth', 'Hollow Moth', 15, 2, 0, 5, 2, 3, 0),
+  ('void_moth_pale_wing', 'Pale Wing', 16, 2, 0, 5, 2, 3, 0),
+  ('void_moth_duskwing', 'Duskwing', 16, 3, 0, 6, 3, 3, 0),
+  ('void_moth_nightwing_moth', 'Nightwing Moth', 17, 3, 0, 6, 3, 3, 0),
+  ('void_moth_blightwing', 'Blightwing', 17, 3, 0, 6, 3, 3, 0),
+  ('void_moth_cindermoth_larva', 'Cindermoth Larva', 18, 3, 0, 6, 3, 3, 0),
+  ('void_moth_sable_moth', 'Sable Moth', 18, 3, 0, 6, 3, 3, 0),
+  ('void_hound_void_hound', 'Void Hound', 18, 3, 1, 6, 3, 2, 0),
+  ('void_hound_gaunt_hound', 'Gaunt Hound', 18, 3, 1, 6, 3, 2, 0),
+  ('void_hound_hollow_hound', 'Hollow Hound', 19, 3, 1, 6, 3, 2, 0),
+  ('void_hound_bone_hound', 'Bone Hound', 19, 3, 1, 6, 3, 2, 0),
+  ('void_hound_ravening_hound', 'Ravening Hound', 20, 3, 1, 6, 3, 2, 0),
+  ('void_hound_sable_hound', 'Sable Hound', 20, 4, 1, 7, 3, 2, 0),
+  ('void_hound_wretch_hound', 'Wretch Hound', 21, 4, 1, 7, 3, 2, 0),
+  ('void_hound_abyss_hound', 'Abyss Hound', 21, 4, 1, 7, 3, 2, 0),
+  ('void_hound_famine_hound', 'Famine Hound', 22, 4, 1, 7, 3, 2, 0),
+  ('void_hound_starved_hound', 'Starved Hound', 22, 4, 1, 7, 3, 2, 0),
+  ('void_grub_stoneshell_grub', 'Stoneshell Grub', 30, 1, 3, 6, 2, 1, 0),
+  ('void_grub_carapace_grub', 'Carapace Grub', 31, 1, 3, 6, 2, 1, 0),
+  ('void_grub_bastion_grub', 'Bastion Grub', 32, 1, 3, 6, 2, 1, 0),
+  ('void_grub_ironhide_larva', 'Ironhide Larva', 33, 1, 3, 6, 2, 1, 0),
+  ('void_grub_warded_grub', 'Warded Grub', 34, 1, 3, 6, 2, 1, 0),
+  ('void_grub_ossified_grub', 'Ossified Grub', 34, 2, 4, 7, 2, 1, 0),
+  ('void_grub_fossil_grub', 'Fossil Grub', 35, 2, 4, 7, 2, 1, 0),
+  ('void_grub_bulwark_grub', 'Bulwark Grub', 36, 2, 4, 7, 2, 1, 0),
+  ('void_grub_encrusted_grub', 'Encrusted Grub', 37, 2, 4, 7, 2, 1, 0),
+  ('void_grub_shellbound_grub', 'Shellbound Grub', 38, 2, 4, 7, 2, 1, 0),
+  ('void_husk_murmuring_husk', 'Murmuring Husk', 24, 2, 2, 6, 3, 1, 0),
+  ('void_husk_silent_husk', 'Silent Husk', 25, 2, 2, 6, 3, 1, 0),
+  ('void_husk_echoing_husk', 'Echoing Husk', 25, 2, 2, 6, 3, 1, 0),
+  ('void_husk_withered_husk', 'Withered Husk', 26, 2, 2, 6, 3, 1, 0),
+  ('void_husk_faded_husk', 'Faded Husk', 27, 2, 2, 6, 3, 1, 0),
+  ('void_husk_hollow_whisper', 'Hollow Whisper', 27, 3, 2, 7, 3, 1, 0),
+  ('void_husk_voiceless_husk', 'Voiceless Husk', 28, 3, 2, 7, 3, 1, 0),
+  ('void_husk_muted_wretch', 'Muted Wretch', 29, 3, 2, 7, 3, 1, 0),
+  ('void_husk_breathless_husk', 'Breathless Husk', 29, 3, 2, 7, 3, 1, 0),
+  ('void_husk_sighing_husk', 'Sighing Husk', 30, 3, 2, 7, 3, 1, 0),
+  ('void_wraith_umbral_shade', 'Umbral Shade', 22, 3, 1, 7, 3, 2, 0),
+  ('void_wraith_grey_wraith', 'Grey Wraith', 23, 3, 1, 7, 3, 2, 0),
+  ('void_wraith_drifting_shade', 'Drifting Shade', 23, 3, 1, 7, 3, 2, 0),
+  ('void_wraith_wailing_wraith', 'Wailing Wraith', 24, 3, 1, 7, 3, 2, 0),
+  ('void_wraith_forsaken_shade', 'Forsaken Shade', 25, 3, 1, 7, 3, 2, 0),
+  ('void_wraith_starving_wraith', 'Starving Wraith', 25, 4, 2, 8, 4, 2, 0),
+  ('void_wraith_ashen_wraith', 'Ashen Wraith', 26, 4, 2, 8, 4, 2, 0),
+  ('void_wraith_ghast_wraith', 'Ghast Wraith', 27, 4, 2, 8, 4, 2, 0),
+  ('void_wraith_weeping_shade', 'Weeping Shade', 27, 4, 2, 8, 4, 2, 0),
+  ('void_wraith_nameless_wraith', 'Nameless Wraith', 28, 4, 2, 8, 4, 2, 0),
+  ('void_voidtouched_chasm_brute', 'Chasm Brute', 26, 4, 1, 8, 4, 2, 0),
+  ('void_voidtouched_deepcrawler', 'Deepcrawler', 27, 4, 1, 8, 4, 2, 0),
+  ('void_voidtouched_abyss_born_horror', 'Abyss-Born Horror', 28, 4, 1, 8, 4, 2, 0),
+  ('void_voidtouched_voidling', 'Voidling', 29, 4, 1, 8, 4, 2, 0),
+  ('void_voidtouched_rift_horror', 'Rift Horror', 30, 4, 1, 8, 4, 2, 0),
+  ('void_voidtouched_warped_stalker', 'Warped Stalker', 30, 5, 2, 9, 4, 2, 0),
+  ('void_voidtouched_corrupted_brute', 'Corrupted Brute', 31, 5, 2, 9, 4, 2, 0),
+  ('void_voidtouched_twisted_horror', 'Twisted Horror', 32, 5, 2, 9, 4, 2, 0),
+  ('void_voidtouched_maw_touched_fiend', 'Maw-Touched Fiend', 33, 5, 2, 9, 4, 2, 0),
+  ('void_voidtouched_hollow_colossus', 'Hollow Colossus', 34, 5, 2, 9, 4, 2, 0)
 on conflict (key) do update set
   name = excluded.name, max_hp = excluded.max_hp, attack = excluded.attack,
   defense = excluded.defense, xp_reward = excluded.xp_reward,
