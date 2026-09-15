@@ -256,6 +256,18 @@ const CLASS_PORTRAITS = {
   magi: "img/class-magi-avatar.jpg",
   striker: "img/class-striker-avatar.jpg",
 };
+// Mirrors class_defs.mods in schema.sql exactly (see that seed data's
+// comment for the design rationale) -- kept in sync by hand, same as the
+// class-bonus text already hardcoded on the class-select cards in
+// index.html. Used only to DISPLAY each class's real combat-time bonus on
+// the Combat Stats panel below; the actual damage math always reads the
+// live values from class_defs server-side, this is never sent anywhere.
+const CLASS_MODS = {
+  warrior: { hp_pct: 5, attack_pct: 5, defense_pct: 5 },
+  archer: { attack_pct: 10, defense_pct: -5, crit_chance_flat: 10 },
+  magi: { attack_pct: 5, defense_pct: -20, crit_chance_flat: 10, multi_strike_flat: 10 },
+  striker: { defense_pct: -10, crit_chance_flat: 20, multi_strike_flat: 20 },
+};
 
 // Scoped to #class-grid specifically (the auth-screen picker) so it never
 // picks up the near-identical .class-card markup inside the banish overlay
@@ -465,6 +477,15 @@ async function loadProfile() {
   renderProfile();
 }
 
+// "1 (+5%)" / "1 (-20%)" / "1" (no annotation when the class has no mod
+// for this stat) -- keeps the base number itself an honest, unmodified
+// value (what gear will actually move later) while still surfacing the
+// class's effect right next to it.
+function formatStatWithClassPct(base, pct) {
+  if (!pct) return String(base);
+  return `${base} (${pct > 0 ? "+" : ""}${pct}%)`;
+}
+
 function renderProfile() {
   const p = state.profile;
   if (!p) return;
@@ -477,6 +498,12 @@ function renderProfile() {
   const className = p.class ? p.class.charAt(0).toUpperCase() + p.class.slice(1) : "Wanderer";
   $("avatar-portrait").src = portraitSrc;
   $("avatar-portrait").alt = className;
+  // Same portrait, small, next to the player's name in Current Battle --
+  // mirrors the enemy pack's placeholder art slot so the two sides line up
+  // (see .battle-mob-slot in style.css) instead of the enemy's icon+name
+  // sitting lower than the player's name with nothing above it.
+  $("battle-player-icon").src = portraitSrc;
+  $("battle-player-icon").alt = className;
   // Cache the real class so the inline script next to the img tag (see
   // index.html) can set the correct portrait immediately on the NEXT page
   // load, before this profile fetch even starts — that's what stops the
@@ -494,11 +521,20 @@ function renderProfile() {
   $("stat-prowess").textContent = p.abyssal_prowess;
   $("stat-actions").textContent = p.actions; // shown on the Refresh Actions button now — just the remaining count, no /max
 
-  $("stat-power").textContent = p.attack;
-  $("stat-defense").textContent = p.defense;
+  // Power/Defense/Crit/Multi Strike all get a permanent, always-on bonus
+  // from the player's class (see CLASS_MODS above / class_defs in
+  // schema.sql) that strike_enemy() applies during every fight but never
+  // writes back to these raw profiles columns -- so showing p.attack etc.
+  // alone silently hid the class entirely from this panel. Power/Defense
+  // keep the base number (gear will actually move that number later) with
+  // the class's live percent bonus alongside it; Crit/Multi Strike show
+  // the resolved total directly since there's no other source for them yet.
+  const classMods = CLASS_MODS[p.class] || {};
+  $("stat-power").textContent = formatStatWithClassPct(p.attack, classMods.attack_pct);
+  $("stat-defense").textContent = formatStatWithClassPct(p.defense, classMods.defense_pct);
   $("stat-attack-speed").textContent = p.attack_speed;
-  $("stat-crit").textContent = `${p.crit}%`;
-  $("stat-multi-strike").textContent = `${p.multi_strike}%`;
+  $("stat-crit").textContent = `${p.crit + (classMods.crit_chance_flat || 0)}%`;
+  $("stat-multi-strike").textContent = `${p.multi_strike + (classMods.multi_strike_flat || 0)}%`;
   $("stat-speed").textContent = p.speed;
 
   const hpPct = Math.max(0, Math.min(100, (p.hp / p.max_hp) * 100));

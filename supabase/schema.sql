@@ -513,7 +513,13 @@ create or replace function handle_new_user()
 returns trigger
 language plpgsql
 security definer
-set search_path = public
+-- "extensions" (not just "public") because Supabase installs pgcrypto
+-- there by default, not into public -- crypt()/gen_salt() below are
+-- unqualified, so without extensions on the search_path this trigger
+-- throws "function crypt(text, text) does not exist" on every signup that
+-- sets a security question, which GoTrue surfaces to the client as the
+-- generic "Database error saving new user".
+set search_path = public, extensions
 as $$
 declare
   chosen_class text;
@@ -592,7 +598,8 @@ create or replace function reset_password_with_security_answer(
 returns boolean
 language plpgsql
 security definer
-set search_path = public
+-- see handle_new_user()'s comment above on why this needs "extensions" too
+set search_path = public, extensions
 as $$
 declare
   target_id uuid;

@@ -555,6 +555,14 @@ button:disabled { opacity: 0.4; cursor: not-allowed; }
   color: var(--dim);
   opacity: 0.6;
 }
+.battle-mob-slot-img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  object-position: top;
+  border-radius: 7px;
+  display: block;
+}
 .battle-side .hp-bar { width: 100%; }
 .battle-hp-text { font-size: 0.75rem; color: var(--dim); }
 .hp-bar { background: #2a1f36; border-radius: 4px; height: 16px; overflow: hidden; margin: 8px 0 4px; }
@@ -658,6 +666,10 @@ button:disabled { opacity: 0.4; cursor: not-allowed; }
   opacity: 0.55;
 }
 .equip-slot-label { font-size: 0.75rem; letter-spacing: 0.5px; color: var(--dim); }
+
+.affix-slots-title { text-align: center; }
+.affix-slots-grid { grid-template-columns: repeat(2, 1fr); }
+.affix-slots-grid .equip-slot { aspect-ratio: auto; height: 44px; }
 
 /* Inventory */
 

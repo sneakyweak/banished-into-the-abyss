@@ -178,7 +178,19 @@
             <li><span class="stat-label">Multi Strike</span><span id="stat-multi-strike">0%</span></li>
             <li><span class="stat-label">Speed</span><span id="stat-speed">0</span></li>
           </ul>
-          <p class="log">Gear-driven — these hold at base until items/relics exist.</p>
+          <div class="panel-divider"></div>
+          <h3 class="panel-subtitle affix-slots-title">Additional Affixes</h3>
+          <!-- Reserved slots for affixes gear will eventually roll (same
+               vocabulary as the pack-combat affixes/debuffs in schema.sql —
+               see class_defs/affix_defs there). Not wired up yet; these
+               just hold the space out so the panel doesn't visibly change
+               shape once gear grants the first one. -->
+          <div class="equip-grid affix-slots-grid">
+            <div class="equip-slot"><span class="equip-slot-label">Affix</span></div>
+            <div class="equip-slot"><span class="equip-slot-label">Affix</span></div>
+            <div class="equip-slot"><span class="equip-slot-label">Affix</span></div>
+            <div class="equip-slot"><span class="equip-slot-label">Affix</span></div>
+          </div>
         </aside>
       </div>
 
@@ -187,6 +199,13 @@
           <h2 class="panel-title">Current Battle</h2>
           <div class="battle-arena">
             <div class="battle-side battle-player">
+              <!-- Mirrors the enemy pack's placeholder art slot below (same
+                   box size) so both sides' name/HP bar start at the same
+                   height instead of the player's column sitting higher up
+                   with nothing above the name. -->
+              <div class="battle-mob-slot">
+                <img id="battle-player-icon" class="battle-mob-slot-img" alt="" />
+              </div>
               <div class="battle-name" id="battle-player-name">—</div>
               <div class="battle-sub">Lv <span id="battle-player-level">1</span></div>
               <div class="hp-bar"><div id="player-hp-fill" class="hp-fill hp-fill-player"></div></div>
@@ -416,12 +435,15 @@
        brand-new visitor never sees it — only a browser that previously
        stored a different version. -->
   <script>
-    window.APP_VERSION = "14";
+    window.APP_VERSION = "16";
     window.PATCH_NOTES = [
       "Classes now have real starting bonuses instead of being purely cosmetic — Warrior (+5% HP/Defense/Power), Archer (+10% Crit/Power, -5% Defense), Magi (+10% Multi Strike/Crit, +5% Power, -20% Defense), Striker (+20% Multi Strike/Crit, -10% Defense). Shown right on the class-select screen.",
       "You now choose your class again each time you Banish, instead of being stuck with your first pick forever.",
       "New: an optional security question, set at signup, lets you reset your own password later — there's a 'Forgot password?' link on the sign-in screen. No email address is ever needed.",
       "Compressed the sign-in screen (smaller title, smaller class art) so it all fits on one screen instead of needing a scroll, and rearranged the corner logo to Banished / Into-The / Abyss in one line.",
+      "Fixed: Current Battle's HP bars were staggered because the enemy side had an art slot above its name and the player side didn't — added a matching portrait slot on the player's side so both line up.",
+      "Fixed: the Combat Stats panel (Power/Defense/Crit/Multi Strike) now actually reflects your class's bonus instead of always showing the same base numbers for every class.",
+      "Combat Stats now has a reserved \"Additional Affixes\" section with a few open slots for the affixes gear will eventually roll.",
     ];
   </script>
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js"></script>
