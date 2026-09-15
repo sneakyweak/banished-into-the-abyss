@@ -51,8 +51,11 @@ body {
   border-bottom: 1px solid var(--border);
   backdrop-filter: blur(2px);
 }
-.brand-compact { display: flex; flex-direction: column; align-items: flex-start; gap: 0; line-height: 1.15; }
-.brand-compact-line { font-size: 0.7rem; letter-spacing: 2px; color: var(--dim); }
+/* Banished | Into / The (stacked) | Abyss, left to right */
+.brand-compact { display: flex; flex-direction: row; align-items: center; gap: 6px; line-height: 1; }
+.brand-compact-word { font-size: 0.7rem; letter-spacing: 2px; color: var(--dim); }
+.brand-compact-stack { display: flex; flex-direction: column; align-items: center; gap: 1px; }
+.brand-compact-line { font-size: 0.5rem; letter-spacing: 1.5px; color: var(--dim); }
 .brand-compact-abyss {
   font-size: 1.05rem;
   font-weight: 700;
@@ -69,35 +72,35 @@ body {
 
 .hero-title {
   text-align: center;
-  margin: 48px auto 28px;
+  margin: 10px auto 6px;
 }
 .hero-line {
   color: var(--text);
 }
 .hero-banished {
-  font-size: clamp(1.8rem, 5vw, 2.6rem);
+  font-size: clamp(1.3rem, 3.5vw, 1.8rem);
   font-weight: 700;
-  letter-spacing: 6px;
+  letter-spacing: 4px;
 }
 .hero-into, .hero-the {
-  font-size: clamp(0.85rem, 2vw, 1.05rem);
+  font-size: clamp(0.65rem, 1.5vw, 0.8rem);
   font-weight: 500;
-  letter-spacing: 8px;
+  letter-spacing: 6px;
   color: var(--dim);
-  margin-top: 2px;
+  margin-top: 1px;
 }
 .hero-abyss {
   position: relative;
   display: inline-block;
-  margin-top: 10px;
-  padding: 30px 60px;
+  margin-top: 2px;
+  padding: 6px 40px;
 }
 .hero-abyss-text {
   position: relative;
   z-index: 2;
-  font-size: clamp(3rem, 11vw, 5.5rem);
+  font-size: clamp(2rem, 7vw, 3.2rem);
   font-weight: 900;
-  letter-spacing: 4px;
+  letter-spacing: 3px;
   color: #d8bfff;
   text-shadow:
     0 0 10px #a855f7,
@@ -161,6 +164,10 @@ body {
   margin: 12px;
   box-shadow: 0 0 0 1px rgba(139, 92, 246, 0.04), 0 8px 24px rgba(0, 0, 0, 0.35);
 }
+/* the auth screen packs a lot in (hero title, class picker, sign-in form,
+   security question fields) -- trim its own top/bottom padding a bit
+   tighter than a normal game panel so more of it fits without scrolling. */
+#auth-screen.panel { padding: 10px 18px; margin: 8px auto; max-width: 720px; }
 
 .panel-title {
   font-size: 1rem;
@@ -180,7 +187,7 @@ body {
   background: linear-gradient(90deg, transparent, var(--border) 20%, var(--border) 80%, transparent);
 }
 
-.class-picker { max-width: 640px; margin: 0 auto 24px; text-align: center; }
+.class-picker { max-width: 640px; margin: 0 auto 14px; text-align: center; }
 .class-picker .panel-subtitle { justify-content: center; }
 .class-grid {
   display: grid;
@@ -203,8 +210,9 @@ body {
 }
 .class-card img {
   width: 100%;
-  aspect-ratio: 3 / 4;
+  aspect-ratio: 1 / 1;
   object-fit: cover;
+  object-position: top;
   border-radius: 5px;
   display: block;
 }
@@ -242,7 +250,14 @@ body {
   display: block;
 }
 
-.auth-box { max-width: 340px; margin: 0 auto 40px; display: flex; flex-direction: column; gap: 8px; }
+.auth-box { max-width: 340px; margin: 0 auto 16px; display: flex; flex-direction: column; gap: 6px; }
+.auth-box .panel-divider { margin: 8px 0; }
+.auth-box p { margin: 0; }
+.security-qa-row { display: flex; gap: 6px; }
+.security-qa-row input { flex: 1; min-width: 0; }
+.auth-hint-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
+.auth-hint-row .log { flex: 1 1 auto; }
+.auth-hint-row .btn-link { flex: 0 0 auto; white-space: nowrap; }
 .auth-box input {
   background: #0c0a10; border: 1px solid var(--border); color: var(--text);
   padding: 8px; border-radius: 4px; font-family: inherit;

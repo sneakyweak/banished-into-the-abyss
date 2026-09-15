@@ -12,9 +12,11 @@
 
   <header class="topbar">
     <div class="brand-compact">
-      <span class="brand-compact-line">Banished</span>
-      <span class="brand-compact-line">Into</span>
-      <span class="brand-compact-line">The</span>
+      <span class="brand-compact-word">Banished</span>
+      <span class="brand-compact-stack">
+        <span class="brand-compact-line">Into</span>
+        <span class="brand-compact-line">The</span>
+      </span>
       <span class="brand-compact-abyss">Abyss</span>
     </div>
     <div class="topbar-right">
@@ -72,17 +74,21 @@
         <button id="btn-signup">Sign Up</button>
       </div>
       <p id="auth-error" class="error"></p>
-      <p class="log">No email needed — just pick a character name and password.</p>
-      <button type="button" id="btn-forgot-password" class="btn-link">Forgot password?</button>
+      <div class="auth-hint-row">
+        <p class="log">No email needed — just a character name and password.</p>
+        <button type="button" id="btn-forgot-password" class="btn-link">Forgot password?</button>
+      </div>
 
       <!-- Security question is set once, only at signup (used below by
            Sign Up) — ignored on Sign In. Both fields are optional: skip
            them and there's simply no self-service recovery available for
            that character later, same as leaving it unset today. -->
       <div class="panel-divider"></div>
-      <p class="log">Optional — set a security question now so you can reset your password later without an email on file:</p>
-      <input id="auth-security-question" type="text" maxlength="200" placeholder="security question (optional)" autocomplete="off" />
-      <input id="auth-security-answer" type="text" maxlength="200" placeholder="answer (optional)" autocomplete="off" />
+      <p class="log">Optional security question, for password recovery later:</p>
+      <div class="security-qa-row">
+        <input id="auth-security-question" type="text" maxlength="200" placeholder="question (optional)" autocomplete="off" />
+        <input id="auth-security-answer" type="text" maxlength="200" placeholder="answer (optional)" autocomplete="off" />
+      </div>
     </div>
   </section>
 
@@ -410,11 +416,12 @@
        brand-new visitor never sees it — only a browser that previously
        stored a different version. -->
   <script>
-    window.APP_VERSION = "13";
+    window.APP_VERSION = "14";
     window.PATCH_NOTES = [
       "Classes now have real starting bonuses instead of being purely cosmetic — Warrior (+5% HP/Defense/Power), Archer (+10% Crit/Power, -5% Defense), Magi (+10% Multi Strike/Crit, +5% Power, -20% Defense), Striker (+20% Multi Strike/Crit, -10% Defense). Shown right on the class-select screen.",
       "You now choose your class again each time you Banish, instead of being stuck with your first pick forever.",
       "New: an optional security question, set at signup, lets you reset your own password later — there's a 'Forgot password?' link on the sign-in screen. No email address is ever needed.",
+      "Compressed the sign-in screen (smaller title, smaller class art) so it all fits on one screen instead of needing a scroll, and rearranged the corner logo to Banished / Into-The / Abyss in one line.",
     ];
   </script>
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js"></script>
