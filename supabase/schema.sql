@@ -1344,7 +1344,11 @@ drop function if exists get_or_spawn_player_enemy(text);
 -- has been fully cleared already (every member's hp <= 0 — strike_enemy
 -- normally leaves a live pack behind after any clear/death, so in practice
 -- this only really fires for a brand-new player or right after
--- set_encounter_settings deliberately clears the row). Rolls a fresh set of
+-- set_encounter_settings deliberately clears the row; a mid-fight
+-- clear/death respawn is handled entirely inside strike_enemy() itself,
+-- which rolls its own fresh affix/debuff set the same way this function
+-- does — see new_affix_keys/new_debuff_keys there — so this function never
+-- even runs for that far more common case). Rolls a fresh set of
 -- affixes/debuffs from the player's current sel_* choices and snapshots
 -- them onto player_combat so they stay fixed for this pack's lifetime.
 -- bracket_used (both here and on player_combat itself) now records the
@@ -1574,6 +1578,16 @@ declare
   player_first boolean;
   counter_delta int;
   counter_hits jsonb;
+  -- Whatever affixes/debuffs the pack we're CURRENTLY fighting rolled with,
+  -- carried forward unchanged by default. Every mid-tick respawn point below
+  -- (pack cleared, or either death branch) reassigns these to a brand-new
+  -- random draw before rolling the next pack, so a fresh enemy really does
+  -- mean fresh modifiers rather than reusing whatever get_or_spawn_pack()
+  -- rolled once when this player_combat row was first created. Persisted
+  -- back to player_combat at the very end either way (unchanged is still a
+  -- write, just a no-op one).
+  new_affix_keys jsonb;
+  new_debuff_keys jsonb;
 begin
   select * into p from profiles where id = auth.uid() for update;
   if not found then raise exception 'no profile'; end if;
@@ -1607,6 +1621,8 @@ begin
 
   perform get_or_spawn_pack(p_enemy_key); -- ensures a live pack (and its affixes/debuffs) exists
   select * into pc from player_combat where profile_id = auth.uid();
+  new_affix_keys := pc.affix_keys;
+  new_debuff_keys := pc.debuff_keys;
 
   select coalesce(jsonb_agg(mods), '[]'::jsonb) into debuff_mod_bundles
     from debuff_defs where key in (select jsonb_array_elements_text(pc.debuff_keys));
@@ -1700,6 +1716,15 @@ begin
         ));
         total_deaths := total_deaths + 1;
         cur_player_hp := cur_player_max_hp;
+        -- New pack incoming -- reroll affixes/debuffs so it doesn't inherit
+        -- whatever this dead pack happened to spawn with (see new_affix_keys/
+        -- new_debuff_keys declaration above).
+        select coalesce(jsonb_agg(key), '[]'::jsonb) into new_affix_keys
+          from (select key from affix_defs order by random() limit greatest(0, p.sel_affix_count)) s;
+        select coalesce(jsonb_agg(key), '[]'::jsonb) into new_debuff_keys
+          from (select key from debuff_defs order by random() limit greatest(0, p.sel_debuff_count)) s;
+        select coalesce(sum(mod_val(mods, 'hp_pct')), 0) into hp_pct
+          from affix_defs where key in (select jsonb_array_elements_text(new_affix_keys));
         cur_pack := apply_hp_mod(roll_pack(p_enemy_key, p.sel_pack_size, p.depth), hp_pct);
         exit exchanges;
       end if;
@@ -1783,6 +1808,15 @@ begin
       -- roll the next pack now so it's ready and waiting, but STOP here —
       -- this tick's fight is over the moment the pack clears, even with
       -- rounds left in the budget. Fighting it is next tick's job.
+      -- Reroll affixes/debuffs too (see new_affix_keys/new_debuff_keys
+      -- declaration above) -- a genuinely new pack should bring genuinely
+      -- new modifiers instead of carrying the just-cleared pack's forward.
+      select coalesce(jsonb_agg(key), '[]'::jsonb) into new_affix_keys
+        from (select key from affix_defs order by random() limit greatest(0, p.sel_affix_count)) s;
+      select coalesce(jsonb_agg(key), '[]'::jsonb) into new_debuff_keys
+        from (select key from debuff_defs order by random() limit greatest(0, p.sel_debuff_count)) s;
+      select coalesce(sum(mod_val(mods, 'hp_pct')), 0) into hp_pct
+        from affix_defs where key in (select jsonb_array_elements_text(new_affix_keys));
       cur_pack := apply_hp_mod(roll_pack(p_enemy_key, p.sel_pack_size, p.depth), hp_pct);
       exit exchanges;
     end if;
@@ -1828,6 +1862,14 @@ begin
 
         total_deaths := total_deaths + 1;
         cur_player_hp := cur_player_max_hp;
+        -- New pack incoming -- reroll affixes/debuffs, same as the other
+        -- two respawn points above.
+        select coalesce(jsonb_agg(key), '[]'::jsonb) into new_affix_keys
+          from (select key from affix_defs order by random() limit greatest(0, p.sel_affix_count)) s;
+        select coalesce(jsonb_agg(key), '[]'::jsonb) into new_debuff_keys
+          from (select key from debuff_defs order by random() limit greatest(0, p.sel_debuff_count)) s;
+        select coalesce(sum(mod_val(mods, 'hp_pct')), 0) into hp_pct
+          from affix_defs where key in (select jsonb_array_elements_text(new_affix_keys));
         cur_pack := apply_hp_mod(roll_pack(p_enemy_key, p.sel_pack_size, p.depth), hp_pct);
         exit exchanges;
       end if;
@@ -1853,13 +1895,14 @@ begin
   );
 
   update player_combat
-    set pack = cur_pack, updated_at = now(), last_strike_at = now()
+    set pack = cur_pack, affix_keys = new_affix_keys, debuff_keys = new_debuff_keys,
+        updated_at = now(), last_strike_at = now()
     where profile_id = auth.uid();
 
   return query select rounds_run, total_damage, total_kills, total_deaths, cur_player_hp, cur_player_max_hp,
     total_xp, total_gold, cur_actions, false, round_log, cur_pack,
-    (select coalesce(jsonb_agg(name), '[]'::jsonb) from affix_defs where key in (select jsonb_array_elements_text(pc.affix_keys))),
-    (select coalesce(jsonb_agg(name), '[]'::jsonb) from debuff_defs where key in (select jsonb_array_elements_text(pc.debuff_keys))),
+    (select coalesce(jsonb_agg(name), '[]'::jsonb) from affix_defs where key in (select jsonb_array_elements_text(new_affix_keys))),
+    (select coalesce(jsonb_agg(name), '[]'::jsonb) from debuff_defs where key in (select jsonb_array_elements_text(new_debuff_keys))),
     total_xp_lost, total_gold_lost,
     daily.daily_dmg_dealt, daily.daily_dmg_taken, daily.daily_kills, daily.daily_deaths,
     daily.daily_idle_xp, daily.daily_idle_gold, daily.daily_reset_at;
