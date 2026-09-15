@@ -275,7 +275,6 @@ button:disabled { opacity: 0.4; cursor: not-allowed; }
 /* ---------------------------------------------------------------------- */
 
 .page-nav {
-  grid-area: nav;
   display: flex;
   align-items: center;
   flex-wrap: wrap;
@@ -409,32 +408,31 @@ button:disabled { opacity: 0.4; cursor: not-allowed; }
 /* ---------------------------------------------------------------------- */
 
 #game-screen {
-  display: grid;
-  grid-template-columns: 260px 1fr 300px;
-  grid-template-areas:
-    "nav      nav    nav"
-    "sidebar  battle equipment"
-    "sidebar  chat   inventory";
-  align-items: start;
+  display: flex;
+  flex-direction: column;
+}
+/* Each of the three columns is its own independent flex stack, sized only
+   by its own content. Previously these were CSS Grid areas, with the
+   sidebar column spanning both the battle and chat rows — a taller
+   sidebar/equipment column could stretch the "battle" row and leave a
+   visible gap between the battle panel and the chat panel below it, even
+   though they were adjacent in the markup. Flex columns can't do that:
+   chat-panel is always immediately below battle-panel with no gap,
+   regardless of how tall the other columns are. */
+.game-columns {
+  display: flex;
+  align-items: flex-start;
   gap: 0;
 }
-.sidebar { grid-area: sidebar; display: flex; flex-direction: column; }
-.battle-panel { grid-area: battle; margin-bottom: 0; }
-.chat-panel { grid-area: chat; margin-top: 0; }
-.equipment-panel { grid-area: equipment; }
-.inventory-panel { grid-area: inventory; }
+.sidebar { flex: 0 0 260px; min-width: 0; display: flex; flex-direction: column; }
+.col-main { flex: 1 1 0; min-width: 0; display: flex; flex-direction: column; }
+.col-side { flex: 0 0 300px; min-width: 0; display: flex; flex-direction: column; }
+.battle-panel { margin-bottom: 0; }
+.chat-panel { margin-top: 0; }
 
 @media (max-width: 980px) {
-  #game-screen {
-    grid-template-columns: 1fr;
-    grid-template-areas:
-      "nav"
-      "sidebar"
-      "battle"
-      "chat"
-      "equipment"
-      "inventory";
-  }
+  .game-columns { flex-direction: column; }
+  .sidebar, .col-main, .col-side { flex: 1 1 auto; width: 100%; }
   .page-nav-note { display: none; }
 }
 
@@ -503,7 +501,7 @@ button:disabled { opacity: 0.4; cursor: not-allowed; }
 .hp-fill-player { background: linear-gradient(90deg, var(--good), #7fe0a0); }
 
 .battle-panel { text-align: center; }
-.battle-panel .panel-title { text-align: left; }
+.battle-panel .panel-title { text-align: center; }
 .battle-panel .tick-bar { max-width: 420px; margin-left: auto; margin-right: auto; }
 .battle-panel .log { text-align: center; }
 

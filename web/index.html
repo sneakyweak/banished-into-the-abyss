@@ -85,98 +85,104 @@
       <span class="page-nav-note">more pages arrive here as they're built</span>
     </nav>
 
-    <div class="sidebar">
-      <aside class="panel">
-        <div class="avatar-box">
-          <img id="avatar-portrait" class="avatar-portrait" src="img/class-warrior-avatar.jpg" alt="" />
-        </div>
-        <h2 id="char-name">—</h2>
-        <ul class="stat-list">
-          <li><span class="stat-label">Depth</span><span id="stat-depth">0</span></li>
-          <li><span class="stat-label">Level</span><span id="stat-level">1</span></li>
-          <li><span class="stat-label">Experience</span><span id="stat-xp">0</span></li>
-          <li><span class="stat-label">Gold</span><span id="stat-gold">0</span></li>
-          <li><span class="stat-label">Abyssal Prowess</span><span id="stat-prowess">0</span></li>
-          <li><span class="stat-label">Actions</span><span><span id="stat-actions">0</span>/<span id="stat-max-actions">0</span></span></li>
-        </ul>
-      </aside>
+    <div class="game-columns">
+      <div class="sidebar">
+        <aside class="panel">
+          <div class="avatar-box">
+            <img id="avatar-portrait" class="avatar-portrait" src="img/class-warrior-avatar.jpg" alt="" />
+          </div>
+          <h2 id="char-name">—</h2>
+          <ul class="stat-list">
+            <li><span class="stat-label">Depth</span><span id="stat-depth">0</span></li>
+            <li><span class="stat-label">Level</span><span id="stat-level">1</span></li>
+            <li><span class="stat-label">Experience</span><span id="stat-xp">0</span></li>
+            <li><span class="stat-label">Gold</span><span id="stat-gold">0</span></li>
+            <li><span class="stat-label">Abyssal Prowess</span><span id="stat-prowess">0</span></li>
+            <li><span class="stat-label">Actions</span><span><span id="stat-actions">0</span>/<span id="stat-max-actions">0</span></span></li>
+          </ul>
+        </aside>
 
-      <aside class="panel">
-        <h2 class="panel-title">Combat Stats</h2>
-        <ul class="stat-list">
-          <li><span class="stat-label">Power</span><span id="stat-power">0</span></li>
-          <li><span class="stat-label">Defense</span><span id="stat-defense">0</span></li>
-          <li><span class="stat-label">Attack Speed</span><span id="stat-attack-speed">0</span></li>
-          <li><span class="stat-label">Crit</span><span id="stat-crit">0%</span></li>
-          <li><span class="stat-label">Multi Strike</span><span id="stat-multi-strike">0%</span></li>
-          <li><span class="stat-label">Speed</span><span id="stat-speed">0</span></li>
-        </ul>
-        <p class="log">Gear-driven — these hold at base until items/relics exist.</p>
-      </aside>
+        <aside class="panel">
+          <h2 class="panel-title">Combat Stats</h2>
+          <ul class="stat-list">
+            <li><span class="stat-label">Power</span><span id="stat-power">0</span></li>
+            <li><span class="stat-label">Defense</span><span id="stat-defense">0</span></li>
+            <li><span class="stat-label">Attack Speed</span><span id="stat-attack-speed">0</span></li>
+            <li><span class="stat-label">Crit</span><span id="stat-crit">0%</span></li>
+            <li><span class="stat-label">Multi Strike</span><span id="stat-multi-strike">0%</span></li>
+            <li><span class="stat-label">Speed</span><span id="stat-speed">0</span></li>
+          </ul>
+          <p class="log">Gear-driven — these hold at base until items/relics exist.</p>
+        </aside>
+      </div>
+
+      <div class="col-main">
+        <section class="panel battle-panel">
+          <h2 class="panel-title">Current Battle</h2>
+          <div class="battle-arena">
+            <div class="battle-side battle-player">
+              <img id="battle-player-portrait" class="battle-portrait" src="img/class-warrior-avatar.jpg" alt="" />
+              <div class="battle-name" id="battle-player-name">—</div>
+              <div class="battle-sub">Lv <span id="battle-player-level">1</span></div>
+              <div class="hp-bar"><div id="player-hp-fill" class="hp-fill hp-fill-player"></div></div>
+              <div id="player-hp-text" class="battle-hp-text"></div>
+            </div>
+            <div class="battle-vs">VS</div>
+            <div class="battle-side battle-enemy">
+              <span class="avatar-glyph enemy-glyph">🐀</span>
+              <div class="battle-name" id="enemy-name">—</div>
+              <div class="battle-sub">&nbsp;</div>
+              <div class="hp-bar"><div id="enemy-hp-fill" class="hp-fill"></div></div>
+              <div id="enemy-hp-text" class="battle-hp-text"></div>
+            </div>
+          </div>
+
+          <div class="tick-bar"><div id="tick-bar-fill" class="tick-fill"></div></div>
+          <button id="btn-refresh-actions">Refresh Actions</button>
+          <p id="tick-log" class="log"></p>
+        </section>
+
+        <section class="panel chat-panel">
+          <div class="chat-tabs">
+            <button class="chat-tab active" data-channel="global">World</button>
+            <button class="chat-tab" data-channel="guild">Guild</button>
+            <button class="chat-tab" data-channel="whispers">Whispers</button>
+            <span class="chat-tab-soon">Party<i>soon</i></span>
+            <span class="chat-tab-soon">Trade<i>soon</i></span>
+            <span class="chat-tab-soon">Logs<i>soon</i></span>
+          </div>
+          <div id="chat-log" class="chat-log"></div>
+          <form id="chat-form">
+            <input id="chat-input" type="text" maxlength="500"
+                   placeholder="Say something, or /w name msg, /send name gold 10, /send name item_key 1" />
+            <button type="submit">Send</button>
+          </form>
+          <p id="chat-error" class="error"></p>
+        </section>
+      </div>
+
+      <div class="col-side">
+        <section class="panel equipment-panel">
+          <h2 class="panel-title">Equipment</h2>
+          <p class="log">Not wired up yet — gear will land here once crafting/drops exist.</p>
+          <div class="equip-grid">
+            <div class="equip-slot"><span class="equip-slot-label">Helm</span></div>
+            <div class="equip-slot"><span class="equip-slot-label">Garb</span></div>
+            <div class="equip-slot"><span class="equip-slot-label">Ring</span></div>
+            <div class="equip-slot"><span class="equip-slot-label">Ring</span></div>
+            <div class="equip-slot"><span class="equip-slot-label">Relic</span></div>
+            <div class="equip-slot"><span class="equip-slot-label">Relic</span></div>
+          </div>
+        </section>
+
+        <section class="panel inventory-panel">
+          <h2 class="panel-title">Inventory</h2>
+          <ul id="inventory-list" class="inventory-list">
+            <li class="log">Empty.</li>
+          </ul>
+        </section>
+      </div>
     </div>
-
-    <section class="panel battle-panel">
-      <h2 class="panel-title">Current Battle</h2>
-      <div class="battle-arena">
-        <div class="battle-side battle-player">
-          <img id="battle-player-portrait" class="battle-portrait" src="img/class-warrior-avatar.jpg" alt="" />
-          <div class="battle-name" id="battle-player-name">—</div>
-          <div class="battle-sub">Lv <span id="battle-player-level">1</span></div>
-          <div class="hp-bar"><div id="player-hp-fill" class="hp-fill hp-fill-player"></div></div>
-          <div id="player-hp-text" class="battle-hp-text"></div>
-        </div>
-        <div class="battle-vs">VS</div>
-        <div class="battle-side battle-enemy">
-          <span class="avatar-glyph enemy-glyph">🐀</span>
-          <div class="battle-name" id="enemy-name">—</div>
-          <div class="battle-sub">&nbsp;</div>
-          <div class="hp-bar"><div id="enemy-hp-fill" class="hp-fill"></div></div>
-          <div id="enemy-hp-text" class="battle-hp-text"></div>
-        </div>
-      </div>
-
-      <div class="tick-bar"><div id="tick-bar-fill" class="tick-fill"></div></div>
-      <button id="btn-refresh-actions">Refresh Actions</button>
-      <p id="tick-log" class="log"></p>
-    </section>
-
-    <section class="panel chat-panel">
-      <div class="chat-tabs">
-        <button class="chat-tab active" data-channel="global">World</button>
-        <button class="chat-tab" data-channel="guild">Guild</button>
-        <button class="chat-tab" data-channel="whispers">Whispers</button>
-        <span class="chat-tab-soon">Party<i>soon</i></span>
-        <span class="chat-tab-soon">Trade<i>soon</i></span>
-        <span class="chat-tab-soon">Logs<i>soon</i></span>
-      </div>
-      <div id="chat-log" class="chat-log"></div>
-      <form id="chat-form">
-        <input id="chat-input" type="text" maxlength="500"
-               placeholder="Say something, or /w name msg, /send name gold 10, /send name item_key 1" />
-        <button type="submit">Send</button>
-      </form>
-      <p id="chat-error" class="error"></p>
-    </section>
-
-    <section class="panel equipment-panel">
-      <h2 class="panel-title">Equipment</h2>
-      <p class="log">Not wired up yet — gear will land here once crafting/drops exist.</p>
-      <div class="equip-grid">
-        <div class="equip-slot"><span class="equip-slot-label">Helm</span></div>
-        <div class="equip-slot"><span class="equip-slot-label">Garb</span></div>
-        <div class="equip-slot"><span class="equip-slot-label">Ring</span></div>
-        <div class="equip-slot"><span class="equip-slot-label">Ring</span></div>
-        <div class="equip-slot"><span class="equip-slot-label">Relic</span></div>
-        <div class="equip-slot"><span class="equip-slot-label">Relic</span></div>
-      </div>
-    </section>
-
-    <section class="panel inventory-panel">
-      <h2 class="panel-title">Inventory</h2>
-      <ul id="inventory-list" class="inventory-list">
-        <li class="log">Empty.</li>
-      </ul>
-    </section>
 
   </main>
 
@@ -283,7 +289,7 @@
        so returning players who last loaded an older version see the
        new-version popup above exactly once. A brand-new visitor never sees
        it — only a browser that previously stored a different version. -->
-  <script>window.APP_VERSION = "1";</script>
+  <script>window.APP_VERSION = "2";</script>
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js"></script>
   <script src="js/config.js"></script>
   <script src="js/app.js"></script>

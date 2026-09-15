@@ -680,7 +680,8 @@ returns table (
   xp_gained int,
   gold_gained int,
   actions_left int,
-  out_of_actions boolean
+  out_of_actions boolean,
+  rounds_log jsonb
 )
 language plpgsql
 security definer
@@ -708,6 +709,13 @@ declare
   total_deaths int := 0;
   total_xp int := 0;
   total_gold int := 0;
+  -- one entry per round actually fought, in order, so the client can play
+  -- combat back round-by-round instead of only ever seeing the state after
+  -- everything (including any kill/death respawn) has already resolved —
+  -- that end-state snapshot is what made the hp bars look like they were
+  -- never taking damage. Each entry reflects hp right after that round's
+  -- blows, BEFORE any kill/death respawn resets things for the next battle.
+  round_log jsonb := '[]'::jsonb;
 begin
   select * into p from profiles where id = auth.uid() for update;
   if not found then raise exception 'no profile'; end if;
@@ -724,12 +732,12 @@ begin
   -- "out of actions" and "on cooldown" cases return a quiet no-op row
   -- instead of raising — an exception every 8s would just spam the client.
   if p.actions < action_cost then
-    return query select 0, 0, 0, 0, pc.enemy_hp, stats.eff_max_hp, stats.display_name, p.hp, p.max_hp, 0, 0, p.actions, true;
+    return query select 0, 0, 0, 0, pc.enemy_hp, stats.eff_max_hp, stats.display_name, p.hp, p.max_hp, 0, 0, p.actions, true, '[]'::jsonb;
     return;
   end if;
 
   if pc.last_strike_at is not null and pc.last_strike_at + cooldown > now() then
-    return query select 0, 0, 0, 0, pc.enemy_hp, stats.eff_max_hp, stats.display_name, p.hp, p.max_hp, 0, 0, p.actions, false;
+    return query select 0, 0, 0, 0, pc.enemy_hp, stats.eff_max_hp, stats.display_name, p.hp, p.max_hp, 0, 0, p.actions, false, '[]'::jsonb;
     return;
   end if;
 
@@ -776,6 +784,13 @@ begin
         -- RPC call as the rest of the fight, so healing to full here made
         -- the player's hp bar snap back to full on almost every tick and
         -- never visibly drain. Only an actual death (below) resets it.
+        -- Log this round against the enemy that was actually just fought
+        -- (name/max hp before it gets replaced by the next spawn below).
+        round_log := round_log || jsonb_build_array(jsonb_build_object(
+          'enemy_hp', 0, 'enemy_max_hp', cur_enemy_max_hp, 'enemy_name', cur_enemy_name,
+          'player_hp', cur_player_hp, 'player_max_hp', p.max_hp, 'event', 'kill'
+        ));
+
         total_kills := total_kills + 1;
         total_xp := total_xp + stats.eff_xp;
         total_gold := total_gold + stats.eff_gold;
@@ -793,6 +808,11 @@ begin
       if cur_player_hp <= 0 then
         -- battle resolved: the player died — still no real penalty (TUNE),
         -- but it's a tracked, reported outcome now, not a silent reset
+        round_log := round_log || jsonb_build_array(jsonb_build_object(
+          'enemy_hp', cur_enemy_hp, 'enemy_max_hp', cur_enemy_max_hp, 'enemy_name', cur_enemy_name,
+          'player_hp', 0, 'player_max_hp', p.max_hp, 'event', 'death'
+        ));
+
         total_deaths := total_deaths + 1;
         cur_player_hp := p.max_hp;
 
@@ -803,6 +823,13 @@ begin
         cur_enemy_name := stats.display_name;
         exit exchanges;
       end if;
+
+      -- an ordinary round: both sides still standing, both hp values carry
+      -- straight into the next round with no respawn involved.
+      round_log := round_log || jsonb_build_array(jsonb_build_object(
+        'enemy_hp', cur_enemy_hp, 'enemy_max_hp', cur_enemy_max_hp, 'enemy_name', cur_enemy_name,
+        'player_hp', cur_player_hp, 'player_max_hp', p.max_hp, 'event', null
+      ));
     end loop exchanges;
   end loop battles;
 
@@ -818,7 +845,7 @@ begin
     where profile_id = auth.uid();
 
   return query select rounds_run, total_damage, total_kills, total_deaths, cur_enemy_hp, cur_enemy_max_hp,
-    cur_enemy_name, cur_player_hp, p.max_hp, total_xp, total_gold, cur_actions, false;
+    cur_enemy_name, cur_player_hp, p.max_hp, total_xp, total_gold, cur_actions, false, round_log;
 end;
 $$;
 

@@ -275,6 +275,22 @@ function renderEnemy() {
   $("enemy-hp-text").textContent = `${en.enemy_hp} / ${en.max_hp} HP`;
 }
 
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+// Paints one moment of the Current Battle panel — both hp bars plus the
+// enemy name (which can change mid-playback: a kill/death respawns into a
+// freshly-rolled tier, e.g. "Test Rat" -> "Elite Test Rat"). Used both by
+// the round-by-round playback below and to settle on the final true state.
+function renderBattleHp(enemyName, enemyHp, enemyMaxHp, playerHp, playerMaxHp) {
+  $("enemy-name").textContent = enemyName;
+  const ePct = Math.max(0, Math.min(100, (enemyHp / enemyMaxHp) * 100));
+  $("enemy-hp-fill").style.width = ePct + "%";
+  $("enemy-hp-text").textContent = `${enemyHp} / ${enemyMaxHp} HP`;
+  const pPct = Math.max(0, Math.min(100, (playerHp / playerMaxHp) * 100));
+  $("player-hp-fill").style.width = pPct + "%";
+  $("player-hp-text").textContent = `${playerHp} / ${playerMaxHp} HP`;
+}
+
 // Fired automatically once per idle tick (see doTick() below) instead of
 // from a button. Costs a flat 1 action no matter what — but each call
 // resolves one or more whole BATTLES (rounds driven by the player's Attack
@@ -289,6 +305,14 @@ function renderEnemy() {
 // (the flat cost means a fight in progress is never cut short by actions
 // running out mid-way). Returns a short message for the tick log, or null
 // if there's nothing worth reporting (on cooldown, 0 rounds run).
+//
+// row.rounds_log carries one entry per round actually fought (hp right
+// after that round's blows, before any kill/death respawn) — without this,
+// the panel only ever showed the state AFTER everything had already
+// resolved, which is nearly always a fresh/full-looking bar, so it looked
+// like nobody was taking any damage. This plays that log back with a short
+// delay per round before settling on the true final state, capped well
+// under the 8s tick interval so it always finishes before the next tick.
 async function autoStrikeEnemy() {
   const { data, error } = await sb.rpc("strike_enemy", { p_enemy_key: TEST_ENEMY_KEY });
   if (error) {
@@ -298,12 +322,27 @@ async function autoStrikeEnemy() {
   const row = data?.[0];
   if (!row) return null;
 
+  const log = Array.isArray(row.rounds_log) ? row.rounds_log : [];
+  if (log.length > 0) {
+    // most rounds get a quick beat; a kill/death gets a longer one so the
+    // outcome actually registers. Worst case (every round an event, on the
+    // largest possible log) still lands well under the tick interval.
+    const roundDelayMs = log.length > 15 ? 120 : 200;
+    const eventDelayMs = log.length > 15 ? 200 : 350;
+    for (const entry of log) {
+      renderBattleHp(entry.enemy_name, entry.enemy_hp, entry.enemy_max_hp, entry.player_hp, entry.player_max_hp);
+      await sleep(entry.event ? eventDelayMs : roundDelayMs);
+    }
+  }
+
+  // settle on the true final state regardless of whether anything animated
+  // (covers the 0-round cooldown / out-of-actions case too)
   if (state.enemy) {
     state.enemy.name = row.enemy_name;
     state.enemy.enemy_hp = row.enemy_hp;
     state.enemy.max_hp = row.enemy_max_hp;
-    renderEnemy();
   }
+  renderBattleHp(row.enemy_name, row.enemy_hp, row.enemy_max_hp, row.player_hp, row.player_max_hp);
 
   if (row.rounds_fought === 0) {
     return row.out_of_actions ? "Out of actions — click Refresh Actions to keep fighting." : null;
