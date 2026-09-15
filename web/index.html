@@ -294,9 +294,9 @@
        brand-new visitor never sees it — only a browser that previously
        stored a different version. -->
   <script>
-    window.APP_VERSION = "TEST-7";
+    window.APP_VERSION = "7";
     window.PATCH_NOTES = [
-      "TEST BUILD — if you see this popup appear on its own (no refresh), the update notice is working.",
+      "Fixed the update notice not appearing while the game tab was in the background (browsers throttle background timers — it now also checks the instant you switch back to the tab).",
     ];
   </script>
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js"></script>

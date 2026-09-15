@@ -159,6 +159,17 @@ async function pollForNewVersion() {
 checkNewVersion();
 setInterval(pollForNewVersion, VERSION_POLL_INTERVAL_MS);
 
+// Browsers heavily throttle setInterval in a BACKGROUND tab — exactly the
+// state this tab is in while someone tabs away to run the deploy commands
+// — so the interval above can sit stalled well past 60s the whole time
+// nobody's looking. visibilitychange fires immediately (it isn't subject
+// to that throttling) the moment the tab is switched back to, which is
+// precisely the moment someone would actually be checking for the popup,
+// so poll right then too instead of waiting on the throttled interval.
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible") pollForNewVersion();
+});
+
 $("btn-close-new-version-overlay").addEventListener("click", () => {
   $("new-version-overlay").classList.add("hidden");
   stopNewVersionCountdown();
