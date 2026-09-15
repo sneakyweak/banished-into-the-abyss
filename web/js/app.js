@@ -86,6 +86,12 @@ function checkNewVersion() {
 function showNewVersionPopup() {
   const latest = Array.isArray(window.PATCH_NOTES) ? window.PATCH_NOTES[0] : null;
   const notes = latest?.notes ?? [];
+  const tag = $("new-version-patch-tag");
+  // latest.version rather than window.APP_VERSION -- they should always
+  // agree by convention (PATCH_NOTES[0] IS the latest shipped version), but
+  // this popup is specifically showing latest's notes, so it reads its own
+  // number straight off the same object rather than a second global.
+  if (tag) tag.textContent = latest?.version ? `v${latest.version}` : "";
   const list = $("patch-notes-list");
   if (list) {
     list.innerHTML = "";

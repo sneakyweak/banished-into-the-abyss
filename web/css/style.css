@@ -83,7 +83,11 @@ body {
   cursor: pointer;
 }
 .patch-notes-btn:hover { border-color: var(--accent); color: var(--text); }
-#patch-notes-version-tag { color: var(--accent-bright); font-weight: bold; }
+/* Shared by the topbar button's tag and #new-version-patch-tag (the "Abyss
+   Stirs" popup's heading) -- both mirror the same version number, just from
+   two different call sites in app.js (updatePatchNotesVersionTag() and
+   showNewVersionPopup() respectively). */
+.version-tag { color: var(--accent-bright); font-weight: bold; }
 
 /* ---------------------------------------------------------------------- */
 /* Hero title (auth screen)                                                */

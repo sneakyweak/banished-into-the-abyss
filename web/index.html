@@ -23,7 +23,7 @@
            (below) and show up here automatically. Distinct from
            #new-version-overlay, which only ever shows the LATEST patch's
            notes, once, to a returning player. -->
-      <button type="button" id="btn-patch-notes" class="patch-notes-btn">Patch Notes <span id="patch-notes-version-tag"></span></button>
+      <button type="button" id="btn-patch-notes" class="patch-notes-btn">Patch Notes <span id="patch-notes-version-tag" class="version-tag"></span></button>
     </div>
     <div class="topbar-right">
       <button id="btn-signout" class="btn-ghost hidden">Sign Out</button>
@@ -447,7 +447,7 @@
       <h2 class="panel-title">The Abyss Stirs</h2>
       <p class="log">From the darkness, new power is birthed.</p>
       <div class="panel-divider"></div>
-      <h3 class="panel-subtitle">Patch Notes</h3>
+      <h3 class="panel-subtitle">Patch Notes <span id="new-version-patch-tag" class="version-tag"></span></h3>
       <ul id="patch-notes-list" class="patch-notes-list"></ul>
       <button id="btn-refresh-now-version">Refresh Now</button>
       <p id="new-version-countdown" class="log"></p>
