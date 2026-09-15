@@ -1936,6 +1936,21 @@ declare
   dmg bigint := 0; -- guild bosses are disabled for now (see 4c below); kept
                     -- in the return signature so callers don't need to change
   daily record;
+  -- Level-scaled stat growth (see level_stats() above): computed as a
+  -- DELTA between the old and new level's curve values, then ADDED onto
+  -- the character's current attack/defense/max_hp rather than overwriting
+  -- them outright -- that's what keeps this composing correctly with
+  -- whatever a previous Banishment already retained, instead of silently
+  -- erasing it the moment this life's leveling starts moving the number
+  -- again. Computing it as a single before/after delta (rather than
+  -- looping level-by-level) means a multi-level jump in one tick -- e.g.
+  -- offline catch-up granting a big burst of xp -- still resolves in one
+  -- shot.
+  old_stats record;
+  new_stats record;
+  attack_delta int := 0;
+  defense_delta int := 0;
+  hp_delta int := 0;
   -- Offline combat simulation: one simulated action per seconds_per_action
   -- of real elapsed time, same cadence strike_enemy() runs at while online
   -- (TICK_INTERVAL_MS in app.js) -- so a player who was away fights through
@@ -2025,11 +2040,35 @@ begin
   -- just because xp dropped since the last time this ran.
   lvl := greatest(p.level, 1, floor(sqrt((p.xp + gained_xp + combat_xp - combat_xp_lost) / 100.0))::int); -- TUNE: level curve
 
+  if lvl > p.level then
+    select * into old_stats from level_stats(p.level);
+    select * into new_stats from level_stats(lvl);
+    attack_delta := new_stats.attack - old_stats.attack;
+    defense_delta := new_stats.defense - old_stats.defense;
+    hp_delta := new_stats.max_hp - old_stats.max_hp;
+  end if;
+
   update profiles
     set xp = greatest(0, xp + gained_xp + combat_xp - combat_xp_lost),
         gold = greatest(0, gold + gained_gold + combat_gold - combat_gold_lost),
         level = lvl,
-        hp = case when n_actions > 0 then combat_hp else hp end,
+        attack = attack + attack_delta,
+        defense = defense + defense_delta,
+        max_hp = max_hp + hp_delta,
+        -- current hp rises by the same amount max_hp just did, on top of
+        -- whichever base this tick's combat (if any) already left it at --
+        -- leveling up shouldn't shrink how "full" the player's bar reads.
+        -- Clamped with least(): resolve_combat_action() clamps combat_hp
+        -- against an *effective* max_hp that includes class hp_pct bonuses
+        -- (warrior/magi: +5%), which can run above this character sheet's
+        -- own raw max_hp column (see strike_enemy()'s matching clamp) --
+        -- without this, that transient overheal would get "locked in" as a
+        -- permanent hp > max_hp overflow the instant a level-up's hp_delta
+        -- stacks on top of it.
+        hp = least(
+          p.max_hp + hp_delta,
+          (case when n_actions > 0 then combat_hp else hp end) + hp_delta
+        ),
         actions = case when n_actions > 0 then p.actions - n_actions else actions end,
         last_tick_at = now(),
         last_active_at = now()
@@ -2152,7 +2191,13 @@ begin
   res := resolve_combat_action(p, pc.pack, p.hp, pc.affix_keys, pc.debuff_keys, true);
 
   update profiles
-    set hp = res.cur_player_hp,
+    -- least(): resolve_combat_action() clamps cur_player_hp against an
+    -- *effective* max_hp that includes class hp_pct bonuses (warrior/magi:
+    -- +5%), which can run above this character sheet's raw max_hp column --
+    -- fine for the in-fight response below (player_hp/player_max_hp are
+    -- returned together as a consistent pair), but the persisted column
+    -- must never itself claim more hp than its own max_hp says is possible.
+    set hp = least(res.cur_player_hp, p.max_hp),
         xp = greatest(0, xp + res.xp_gained - res.xp_lost),
         gold = greatest(0, gold + res.gold_gained - res.gold_lost),
         actions = cur_actions
@@ -2179,6 +2224,52 @@ end;
 $$;
 
 -- ----------------------------------------------------------------------------
+-- 4c-2. Level-scaled character-sheet stats
+--    Combat balance fix: attack/defense/max_hp used to sit completely flat
+--    for a character's ENTIRE first life -- level was purely a display/
+--    xp-threshold number with zero effect on how hard the player hit or how
+--    much they could take. That made the whole 1-100 climb mechanically
+--    identical from the first fight to the hundredth: the same enemy took
+--    the same number of hits at level 1 and level 99.
+--    level_stats() is the fix -- a level-1-to-100 growth curve for attack/
+--    defense/max_hp. level_stats(1) is anchored to profiles' actual CURRENT
+--    signup default (8/6/30 -- see the "early-game rebalance" ALTERs near
+--    the top of this file). An earlier draft of this function anchored
+--    level 1 to 1/1/10 instead -- that was ALSO a signup default at one
+--    point, from an earlier rebalance pass, but it was itself superseded by
+--    the 8/6/30 easing that comes right after it in this file, and 8/6/30
+--    is the one that's actually live; the 1/1/10 draft was caught during
+--    testing (it made fresh-signup stats jump the instant this shipped) and
+--    corrected before shipping. level_stats(100) is a new endpoint
+--    (20/15/75, a flat 2.5x over the level-1 floor across all three stats)
+--    -- there was no pre-existing "what should level 100 look like"
+--    reference to anchor to here, unlike level 1: perform_banishment()'s own
+--    "base" floor constant was ALWAYS just a copy of the signup default
+--    (8/6/30, with a comment claiming it "matches a fresh character's
+--    default" -- true, as it turns out, just not usefully so), which meant
+--    Banishment granted literally zero permanent stat benefit to a
+--    first-time banisher, since nothing ever moved their stats above that
+--    floor for retention to carry a fraction of forward in the first place.
+--    Tying the floor to level_stats(100) instead of the flat signup value
+--    fixes both problems at once: a character now visibly grows across
+--    their first 1-100 climb, and reaching level 100 before banishing
+--    finally means something -- retention has actual growth to work with.
+--    Linear TUNE-able curve, nothing fancier -- see perform_idle_tick()'s
+--    level-up handling for how this actually gets applied (additively, so
+--    it composes correctly with whatever a previous Banishment already
+--    retained, rather than overwriting it).
+create or replace function level_stats(p_level int)
+returns table (attack int, defense int, max_hp int)
+language sql
+immutable
+as $$
+  select
+    round(8  + 12.0 * (least(100, greatest(1, p_level)) - 1) / 99.0)::int,
+    round(6  + 9.0  * (least(100, greatest(1, p_level)) - 1) / 99.0)::int,
+    round(30 + 45.0 * (least(100, greatest(1, p_level)) - 1) / 99.0)::int;
+$$;
+
+-- ----------------------------------------------------------------------------
 -- 4d. Banishment (prestige)
 --    At level 100+ a player may sacrifice their character to the Abyss:
 --    level/xp/gold reset and inventory/current-fight state are wiped, but
@@ -2194,11 +2285,12 @@ $$;
 --
 --    IMPORTANT, for whenever itemization gets built (see DESIGN.md §3a):
 --    profiles.attack/defense/max_hp below MUST stay pure "character sheet"
---    numbers — a character's own permanent growth via Banishment retention
---    itself — and gear must NEVER mutate them, no matter how tempting it is
---    to just "+= item bonus" onto the column. Gear stats have to apply the
---    same way class_defs' bonuses already do: a separate modifier bundle
---    read at combat-resolution time (see strike_enemy()'s player_mods),
+--    numbers — a character's own permanent growth via leveling
+--    (level_stats() above) and Banishment retention itself — and gear must
+--    NEVER mutate them, no matter how tempting it is to just "+= item
+--    bonus" onto the column. Gear stats have to apply the same way
+--    class_defs' bonuses already do: a separate modifier bundle read at
+--    combat-resolution time (see resolve_combat_action()'s player_mods),
 --    completely invisible to this function. Otherwise equipping strong
 --    gear right before banishing would let a player permanently bank power
 --    they never really earned on the character itself — gear is supposed
@@ -2232,15 +2324,24 @@ declare
   p profiles%rowtype;
   retain_pct numeric;      -- fraction, e.g. 0.0025 for 0.25%
   display_pct numeric;     -- same tier, as the percent number shown to players
-  base_attack int := 8;    -- TUNE: matches profiles.attack's default for a fresh character
-  base_defense int := 6;   -- TUNE: matches profiles.defense's default
-  base_max_hp int := 30;   -- TUNE: matches profiles.max_hp's default
+  base_attack int;         -- the level-100 floor -- see level_stats() above
+  base_defense int;
+  base_max_hp int;
   new_attack int;
   new_defense int;
   new_max_hp int;
 begin
   select * into p from profiles where id = auth.uid() for update;
   if not found then raise exception 'no profile'; end if;
+
+  -- base_attack/defense/max_hp used to be hardcoded copies of
+  -- level_stats(100)'s output (8/6/30) that could silently drift out of
+  -- sync with it -- reading them straight from that function instead means
+  -- there's exactly one place that ever defines "what a level-100
+  -- character's stats are", and Banishment's floor can never again claim
+  -- to match a level a character reached without actually matching it.
+  select attack, defense, max_hp into base_attack, base_defense, base_max_hp
+    from level_stats(100);
 
   if p.level < 100 then
     raise exception 'you must reach level 100 before you can banish your character';

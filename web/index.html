@@ -510,8 +510,16 @@
        0.100) if the player explicitly asks for a bigger jump for that
        round. -->
   <script>
-    window.APP_VERSION = "0.008";
+    window.APP_VERSION = "0.009";
     window.PATCH_NOTES = [
+      {
+        "version": "0.009",
+        "notes": [
+          "You now actually grow stronger as you level: attack, defense, and max HP rise steadily from level 1 to level 100, instead of sitting flat your whole first life.",
+          "Reaching level 100 before Banishing now matters -- Banishment retention carries forward a slice of the real power you built up, not nothing.",
+          "Fixed a bug where current HP could briefly read higher than max HP after a level-up or a big heal."
+        ]
+      },
       {
         "version": "0.008",
         "notes": [
