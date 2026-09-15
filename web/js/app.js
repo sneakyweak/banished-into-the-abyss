@@ -1590,6 +1590,18 @@ function subscribeChat(kind) {
 }
 
 function subscribeWhispers() {
+  // Same guard subscribeChat() already has just above: sb.auth.onAuthStateChange
+  // (below) re-runs enterGame() -- and therefore this -- on every auth event
+  // with a live session, not just the first sign-in (token refreshes included,
+  // roughly hourly, but also possible in a burst on some browsers). Without
+  // removing any previous subscription first, a second call reuses the SAME
+  // underlying channel (its topic, "whispers:<user id>", never changes for a
+  // given user) since supabase-js returns the existing channel object for an
+  // already-registered topic instead of a fresh one -- and calling .on() on a
+  // channel that's already .subscribe()d throws "cannot add postgres_changes
+  // callbacks ... after subscribe()". Removing it first guarantees the next
+  // .channel() call starts clean.
+  if (state.whisperSub) sb.removeChannel(state.whisperSub);
   state.whisperSub = sb
     .channel(`whispers:${state.user.id}`)
     .on(
