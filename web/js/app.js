@@ -23,6 +23,13 @@ const state = {
   chatChannelSub: null,
   whisperSub: null,
   tickTimer: null,
+  // How many affixes/debuffs can be stacked via the encounter-settings
+  // fields -- read from the real catalog size (see loadCatalogCounts) so
+  // it always tracks however many affix_defs/debuff_defs rows actually
+  // exist in the game. These defaults are only a fallback for the brief
+  // window before that query resolves (or if it fails).
+  maxAffixCount: 5,
+  maxDebuffCount: 4,
 };
 
 const $ = (id) => document.getElementById(id);
@@ -264,9 +271,9 @@ const CLASS_PORTRAITS = {
 // live values from class_defs server-side, this is never sent anywhere.
 const CLASS_MODS = {
   warrior: { hp_pct: 5, attack_pct: 5, defense_pct: 5 },
-  archer: { attack_pct: 10, defense_pct: -5, crit_chance_flat: 10 },
-  magi: { attack_pct: 5, defense_pct: -20, crit_chance_flat: 10, multi_strike_flat: 10 },
-  striker: { defense_pct: -10, crit_chance_flat: 20, multi_strike_flat: 20 },
+  archer: { attack_pct: 10, attack_speed_pct: 5, crit_chance_flat: 10 },
+  magi: { attack_pct: 5, hp_pct: 5, crit_chance_flat: 10, multi_strike_flat: 10 },
+  striker: { attack_speed_pct: 5, crit_chance_flat: 20, multi_strike_flat: 20 },
 };
 
 // Scoped to #class-grid specifically (the auth-screen picker) so it never
@@ -434,6 +441,7 @@ async function enterGame(user) {
 
   $("btn-signout").classList.remove("hidden");
 
+  await loadCatalogCounts();
   await loadProfile();
   await loadGuildMembership();
   await loadInventory();
@@ -477,6 +485,20 @@ async function loadProfile() {
   renderProfile();
 }
 
+// How many affixes/debuffs the encounter-settings fields let you stack --
+// pulled live from affix_defs/debuff_defs (both publicly readable) rather
+// than hardcoded, so the cap always matches however many actually exist.
+// Called once on login, before the first renderEncounterSettings() so the
+// fields' max attributes are correct from the very first paint.
+async function loadCatalogCounts() {
+  const [affixRes, debuffRes] = await Promise.all([
+    sb.from("affix_defs").select("key", { count: "exact", head: true }),
+    sb.from("debuff_defs").select("key", { count: "exact", head: true }),
+  ]);
+  if (!affixRes.error && typeof affixRes.count === "number") state.maxAffixCount = affixRes.count;
+  if (!debuffRes.error && typeof debuffRes.count === "number") state.maxDebuffCount = debuffRes.count;
+}
+
 // "1 (+5%)" / "1 (-20%)" / "1" (no annotation when the class has no mod
 // for this stat) -- keeps the base number itself an honest, unmodified
 // value (what gear will actually move later) while still surfacing the
@@ -484,6 +506,21 @@ async function loadProfile() {
 function formatStatWithClassPct(base, pct) {
   if (!pct) return String(base);
   return `${base} (${pct > 0 ? "+" : ""}${pct}%)`;
+}
+
+// Mirrors perform_idle_tick()'s level curve in schema.sql exactly --
+// level = floor(sqrt(xp / 100)), floored at a displayed minimum of 1 (which
+// is why level 1's own XP span, 0-400, is twice as wide as every level
+// after it: raw levels 0 and 1 both display as "1"). Kept in sync by hand,
+// same spirit as CLASS_MODS above -- purely a display calculation for the
+// XP bar, never sent anywhere or trusted for anything server-side.
+function xpProgress(xp, level) {
+  const lvl = Math.max(1, level || 1);
+  const nextLevelXp = Math.pow(lvl + 1, 2) * 100;
+  const curLevelFloorXp = lvl <= 1 ? 0 : Math.pow(lvl, 2) * 100;
+  const span = Math.max(1, nextLevelXp - curLevelFloorXp);
+  const pct = Math.max(0, Math.min(100, ((xp - curLevelFloorXp) / span) * 100));
+  return { curLevelFloorXp, nextLevelXp, pct };
 }
 
 function renderProfile() {
@@ -498,12 +535,6 @@ function renderProfile() {
   const className = p.class ? p.class.charAt(0).toUpperCase() + p.class.slice(1) : "Wanderer";
   $("avatar-portrait").src = portraitSrc;
   $("avatar-portrait").alt = className;
-  // Same portrait, small, next to the player's name in Current Battle --
-  // mirrors the enemy pack's placeholder art slot so the two sides line up
-  // (see .battle-mob-slot in style.css) instead of the enemy's icon+name
-  // sitting lower than the player's name with nothing above it.
-  $("battle-player-icon").src = portraitSrc;
-  $("battle-player-icon").alt = className;
   // Cache the real class so the inline script next to the img tag (see
   // index.html) can set the correct portrait immediately on the NEXT page
   // load, before this profile fetch even starts — that's what stops the
@@ -516,10 +547,13 @@ function renderProfile() {
 
   $("stat-depth").textContent = p.depth;
   $("stat-level").textContent = p.level;
-  $("stat-xp").textContent = p.xp;
   $("stat-gold").textContent = p.gold;
   $("stat-prowess").textContent = p.abyssal_prowess;
   $("stat-actions").textContent = p.actions; // shown on the Refresh Actions button now — just the remaining count, no /max
+
+  const xp = xpProgress(p.xp, p.level);
+  $("xp-bar-fill").style.width = xp.pct + "%";
+  $("xp-bar-text").textContent = `${p.xp} / ${xp.nextLevelXp} XP`;
 
   // Power/Defense/Crit/Multi Strike all get a permanent, always-on bonus
   // from the player's class (see CLASS_MODS above / class_defs in
@@ -532,7 +566,7 @@ function renderProfile() {
   const classMods = CLASS_MODS[p.class] || {};
   $("stat-power").textContent = formatStatWithClassPct(p.attack, classMods.attack_pct);
   $("stat-defense").textContent = formatStatWithClassPct(p.defense, classMods.defense_pct);
-  $("stat-attack-speed").textContent = p.attack_speed;
+  $("stat-attack-speed").textContent = formatStatWithClassPct(p.attack_speed, classMods.attack_speed_pct);
   $("stat-crit").textContent = `${p.crit + (classMods.crit_chance_flat || 0)}%`;
   $("stat-multi-strike").textContent = `${p.multi_strike + (classMods.multi_strike_flat || 0)}%`;
   $("stat-speed").textContent = p.speed;
@@ -546,40 +580,42 @@ function renderProfile() {
 
 const LAST_CLASS_KEY = "bita_last_class";
 
-// The 4 difficulty-bracket dropdowns below Refresh Actions. Ranges are
-// fixed except Number of Banishments, which depends on the player's own
-// Depth (profiles.depth == banishment count) — it goes up to Depth + 3, so
-// a player can voluntarily push a few brackets above their own progress
-// for better rewards at a real risk of losing (see set_encounter_settings
-// in schema.sql, which enforces this same cap server-side).
+// The 4 difficulty-bracket fields below Refresh Actions. Affix/Debuff
+// counts cap at however many actually exist in the game (state.maxAffixCount
+// / state.maxDebuffCount, loaded once at login -- see loadCatalogCounts).
+// Number of Banishments has no real ceiling at all (see
+// set_encounter_settings in schema.sql, which only rejects a negative
+// value) -- its max attribute is just set to the player's own Depth as a
+// sensible displayed "top", not an enforced cap; typing higher is allowed
+// and deliberately makes enemies tougher (see bracket_mult in
+// enemy_effective_stats).
 function renderEncounterSettings() {
   const p = state.profile;
   if (!p) return;
-  populateSelect($("sel-affix-count"), 0, 5, p.sel_affix_count);
-  populateSelect($("sel-pack-size"), 1, 5, p.sel_pack_size);
-  populateSelect($("sel-debuff-count"), 0, 4, p.sel_debuff_count);
-  populateSelect($("sel-banishment-bracket"), 0, p.depth + 3, p.sel_banishment_bracket);
+  setNumberInput($("sel-affix-count"), 0, state.maxAffixCount, p.sel_affix_count);
+  setNumberInput($("sel-pack-size"), 1, 5, p.sel_pack_size);
+  setNumberInput($("sel-debuff-count"), 0, state.maxDebuffCount, p.sel_debuff_count);
+  setNumberInput($("sel-banishment-bracket"), 0, p.depth, p.sel_banishment_bracket);
 }
 
-// Rebuilds a <select>'s options only when the wanted range actually
-// changed (e.g. Depth just increased from a banishment) — rebuilding on
-// every profile refresh would reset the dropdown's open/focus state for no
-// reason on the far more common case where nothing changed.
-function populateSelect(select, min, max, selectedValue) {
-  if (!select) return;
-  const wanted = [];
-  for (let v = min; v <= max; v++) wanted.push(String(v));
-  const current = Array.from(select.options).map((o) => o.value);
-  if (current.join(",") !== wanted.join(",")) {
-    select.innerHTML = "";
-    wanted.forEach((v) => {
-      const opt = document.createElement("option");
-      opt.value = v;
-      opt.textContent = v;
-      select.appendChild(opt);
-    });
+// Keeps a manually-typed number input's min/max/value in sync with the
+// server's current allowed range and the player's current selection --
+// replaces the old <select>-based populateSelect now that these are plain
+// number inputs. Never stomps on a value the player is actively editing
+// (same reason populateSelect used to only rebuild options on an actual
+// range change): resyncing mid-keystroke would fight the player's typing.
+function setNumberInput(input, min, max, value) {
+  if (!input) return;
+  input.min = String(min);
+  input.max = String(max);
+  if (document.activeElement !== input) {
+    input.value = String(value);
   }
-  select.value = String(selectedValue);
+}
+
+function clampInt(n, min, max) {
+  if (!Number.isFinite(n)) return min;
+  return Math.min(max, Math.max(min, Math.round(n)));
 }
 
 // Applies whatever the 4 dropdowns currently say via set_encounter_settings
@@ -590,10 +626,21 @@ function populateSelect(select, min, max, selectedValue) {
 // the last known-good server state instead of leaving them showing
 // something that didn't actually take effect.
 async function applyEncounterSettings() {
-  const p_pack_size = parseInt($("sel-pack-size").value, 10);
-  const p_affix_count = parseInt($("sel-affix-count").value, 10);
-  const p_debuff_count = parseInt($("sel-debuff-count").value, 10);
-  const p_banishment_bracket = parseInt($("sel-banishment-bracket").value, 10);
+  // Free-typed input can be empty, negative, decimal, or way out of range --
+  // clamp to each field's real bounds (same ones set_encounter_settings
+  // enforces server-side) and write the clamped number straight back into
+  // the field, so e.g. typing 99 affixes when only 5 exist visibly snaps
+  // to 5 instead of just silently sending a different number than what's
+  // on screen. Banishment bracket has no upper bound to clamp to -- only
+  // guard against negative.
+  const p_pack_size = clampInt(parseInt($("sel-pack-size").value, 10), 1, 5);
+  const p_affix_count = clampInt(parseInt($("sel-affix-count").value, 10), 0, state.maxAffixCount);
+  const p_debuff_count = clampInt(parseInt($("sel-debuff-count").value, 10), 0, state.maxDebuffCount);
+  const p_banishment_bracket = clampInt(parseInt($("sel-banishment-bracket").value, 10), 0, Infinity);
+  $("sel-pack-size").value = String(p_pack_size);
+  $("sel-affix-count").value = String(p_affix_count);
+  $("sel-debuff-count").value = String(p_debuff_count);
+  $("sel-banishment-bracket").value = String(p_banishment_bracket);
 
   const { error } = await sb.rpc("set_encounter_settings", {
     p_pack_size,
@@ -662,6 +709,15 @@ function renderPack(pack) {
     name.className = "battle-name";
     name.textContent = enemy.name || "—";
     card.appendChild(name);
+
+    // Empty but present, same as the player card's "Lv X" line below its
+    // name -- without this the enemy cards are one text row shorter than
+    // the player card, which is what staggers every HP bar out of line
+    // with each other even though the art slot above is already matched.
+    const sub = document.createElement("div");
+    sub.className = "battle-sub";
+    sub.innerHTML = "&nbsp;";
+    card.appendChild(sub);
 
     const hpBar = document.createElement("div");
     hpBar.className = "hp-bar";

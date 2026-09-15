@@ -115,6 +115,35 @@ update profiles set crit = 0 where crit = 5;
 update profiles set speed = 1 where speed = 10;
 update profiles set defense = 1 where defense = 5;
 
+-- early-game rebalance: Power 1 -> 8, Defense 1 -> 6, HP 10 -> 30 (a
+-- deliberate difficulty EASING, the opposite direction from the rebalance
+-- right above). Reason: class_defs' percent bonuses (see its seed data
+-- further down) are applied to these numbers at combat-resolution time in
+-- compute_damage(), which only rounds once at the very end -- against a
+-- base as small as attack=1/defense=1, a +5% bonus (1.05) rounds right back
+-- to the unmodified value most of the time, so the bonus was invisible in
+-- practice until a character had banished several times. These new
+-- baselines are large enough for a +5-20% class bonus to actually move the
+-- rounded output from level 1 onward, while staying small relative to
+-- where Banishment retention and (eventually) gear can take them -- still
+-- "starts small", just not so small the class bonuses round away to
+-- nothing. perform_banishment()'s base_attack/base_defense/base_max_hp
+-- constants are kept in sync with these by hand -- see the TUNE comments
+-- there.
+alter table profiles alter column attack set default 8;
+alter table profiles alter column defense set default 6;
+alter table profiles alter column hp set default 30;
+alter table profiles alter column max_hp set default 30;
+
+-- retroactively apply to any EXISTING character still sitting at the prior
+-- baseline (attack=1/defense=1/max_hp=10) -- same "gated on the old default
+-- alone" pattern as every earlier baseline change above; never touches a
+-- character who's already progressed past that baseline via Banishment
+-- retention.
+update profiles set attack = 8 where attack = 1;
+update profiles set defense = 6 where defense = 1;
+update profiles set hp = 30, max_hp = 30 where max_hp = 10;
+
 -- Difficulty-bracket selections (the dropdowns below Refresh Actions).
 -- These are player preferences, not per-fight state — they persist across
 -- fights and only take effect on the NEXT spawned pack (see
@@ -1145,11 +1174,10 @@ begin
 end;
 $$;
 
--- Validates and applies the player's difficulty-bracket dropdown choices.
--- Always clears the in-progress pack so the NEXT strike spawns fresh under
--- the new settings, rather than a live pack silently drifting out of sync
--- with what the dropdowns now say (or, worse, a client-supplied bracket
--- sneaking past the depth+3 cap by never actually respawning).
+-- Validates and applies the player's difficulty-bracket selections. Always
+-- clears the in-progress pack so the NEXT strike spawns fresh under the new
+-- settings, rather than a live pack silently drifting out of sync with what
+-- the fields now say.
 create or replace function set_encounter_settings(
   p_pack_size int,
   p_affix_count int,
@@ -1163,21 +1191,34 @@ set search_path = public
 as $$
 declare
   p profiles%rowtype;
+  max_affix_count int;
+  max_debuff_count int;
 begin
   select * into p from profiles where id = auth.uid() for update;
   if not found then raise exception 'no profile'; end if;
 
+  -- caps read live from the catalog tables rather than a hardcoded number,
+  -- so "how many affixes/debuffs can I stack" always tracks however many
+  -- actually exist in the game -- no code change needed here the next time
+  -- affix_defs/debuff_defs grows a row.
+  select count(*) into max_affix_count from affix_defs;
+  select count(*) into max_debuff_count from debuff_defs;
+
   if p_pack_size not between 1 and 5 then
     raise exception 'pack size must be between 1 and 5';
   end if;
-  if p_affix_count not between 0 and 5 then
-    raise exception 'affix count must be between 0 and 5';
+  if p_affix_count not between 0 and max_affix_count then
+    raise exception 'affix count must be between 0 and %', max_affix_count;
   end if;
-  if p_debuff_count not between 0 and 4 then
-    raise exception 'debuff count must be between 0 and 4';
+  if p_debuff_count not between 0 and max_debuff_count then
+    raise exception 'debuff count must be between 0 and %', max_debuff_count;
   end if;
-  if p_banishment_bracket < 0 or p_banishment_bracket > p.depth + 3 then
-    raise exception 'banishment bracket must be between 0 and % for your current depth', p.depth + 3;
+  -- deliberately uncapped upward: pushing this arbitrarily high above your
+  -- own Depth is a real, unbounded risk/reward lever (see bracket_mult in
+  -- enemy_effective_stats -- it keeps climbing, just ever more slowly),
+  -- not something that should ever hit an artificial ceiling.
+  if p_banishment_bracket < 0 then
+    raise exception 'banishment bracket cannot be negative';
   end if;
 
   update profiles set
@@ -1295,7 +1336,11 @@ begin
   enemy_mods := sum_mods(affix_mod_bundles);
   hp_pct := mod_val(enemy_mods, 'hp_pct');
 
-  rounds_soft_budget := greatest(1, round(base_rounds * p.attack_speed)::int);
+  -- attack_speed_pct (a class-bonus-only key so far -- see class_defs) is
+  -- a percent bonus to the player's raw attack_speed column, applied here
+  -- rather than in compute_damage() since attack_speed drives the pack
+  -- budget, not a per-hit damage roll.
+  rounds_soft_budget := greatest(1, round(base_rounds * p.attack_speed * (1 + mod_val(player_mods, 'attack_speed_pct') / 100.0))::int);
   reward_mult := selection_reward_mult(p.sel_pack_size, p.sel_affix_count, p.sel_debuff_count, p.sel_banishment_bracket);
 
   cur_pack := pc.pack;
@@ -1306,120 +1351,128 @@ begin
   cur_player_hp := least(p.hp, cur_player_max_hp);
   cur_actions := p.actions - action_cost; -- spent once, up front, no matter how the fight goes
 
-  -- outer loop: one iteration per PACK. Only starts a new pack while under
-  -- the soft budget; once a pack is underway, the inner loop always runs
-  -- it to a real resolution (a clear or a death), never breaking off
-  -- partway through just because the budget ran out mid-fight.
-  <<battles>>
+  -- ONE fight (one pack) per call, multiple ROUNDS against it this tick —
+  -- not one loop per pack. rounds_soft_budget (attack-speed-scaled) caps
+  -- how many rounds this tick gets; rounds_hard_cap is just the absolute
+  -- safety ceiling. The moment the pack clears OR the player dies, the
+  -- loop exits immediately and the call is done — it never starts a
+  -- second pack in the same call, even if rounds remain in the budget.
+  -- That used to happen (a fast-clearing pack would let the leftover
+  -- budget spill into a whole new pack, occasionally killing the player
+  -- TWICE in one tick), which read as broken rather than "fast". A pack
+  -- left unresolved when the budget runs out simply picks back up next
+  -- tick, same hp, right where it left off.
+  <<exchanges>>
   loop
-    exit battles when rounds_run >= rounds_soft_budget or rounds_run >= rounds_hard_cap;
+    exit exchanges when rounds_run >= rounds_soft_budget or rounds_run >= rounds_hard_cap;
+    rounds_run := rounds_run + 1;
+    round_hits := '[]'::jsonb;
 
-    <<exchanges>>
-    loop
-      exit battles when rounds_run >= rounds_hard_cap; -- absolute safety valve, even mid-pack
-      rounds_run := rounds_run + 1;
-      round_hits := '[]'::jsonb;
+    -- player's primary swing: targets the first still-alive pack member
+    select min(idx - 1) into target_idx
+      from jsonb_array_elements(cur_pack) with ordinality as t(elem, idx)
+      where (elem->>'hp')::int > 0;
 
-      -- player's primary swing: targets the first still-alive pack member
-      select min(idx - 1) into target_idx
-        from jsonb_array_elements(cur_pack) with ordinality as t(elem, idx)
-        where (elem->>'hp')::int > 0;
+    if target_idx is not null then
+      member := cur_pack -> target_idx;
+      select * into hit from compute_damage(p.attack, p.crit, (member->>'defense')::numeric, player_mods, enemy_mods);
+      cur_pack := jsonb_set(cur_pack, array[target_idx::text, 'hp'],
+        to_jsonb(greatest(0, (member->>'hp')::int - hit.dmg)));
+      total_damage := total_damage + hit.dmg;
+      round_hits := round_hits || jsonb_build_array(jsonb_build_object(
+        'source', 'player', 'target', target_idx, 'dmg', hit.dmg, 'crit', hit.was_crit, 'multi_strike', false
+      ));
 
-      if target_idx is not null then
-        member := cur_pack -> target_idx;
-        select * into hit from compute_damage(p.attack, p.crit, (member->>'defense')::numeric, player_mods, enemy_mods);
-        cur_pack := jsonb_set(cur_pack, array[target_idx::text, 'hp'],
-          to_jsonb(greatest(0, (member->>'hp')::int - hit.dmg)));
-        total_damage := total_damage + hit.dmg;
-        round_hits := round_hits || jsonb_build_array(jsonb_build_object(
-          'source', 'player', 'target', target_idx, 'dmg', hit.dmg, 'crit', hit.was_crit, 'multi_strike', false
-        ));
-
-        -- Multi Strike: a bonus swing that CASCADES to the next still-alive
-        -- member (re-hitting the same one if it's the last one standing) —
-        -- this is what makes the stat directly valuable against a pack,
-        -- not just a flat extra hit on a single target.
-        if random() < (greatest(0, p.multi_strike + mod_val(player_mods, 'multi_strike_flat')) / 100.0) then
-          select min(idx - 1) into target_idx
-            from jsonb_array_elements(cur_pack) with ordinality as t(elem, idx)
-            where (elem->>'hp')::int > 0;
-          if target_idx is not null then
-            member := cur_pack -> target_idx;
-            select * into hit from compute_damage(p.attack, p.crit, (member->>'defense')::numeric, player_mods, enemy_mods);
-            cur_pack := jsonb_set(cur_pack, array[target_idx::text, 'hp'],
-              to_jsonb(greatest(0, (member->>'hp')::int - hit.dmg)));
-            total_damage := total_damage + hit.dmg;
-            round_hits := round_hits || jsonb_build_array(jsonb_build_object(
-              'source', 'player', 'target', target_idx, 'dmg', hit.dmg, 'crit', hit.was_crit, 'multi_strike', true
-            ));
-          end if;
-        end if;
-      end if;
-
-      any_alive := exists (select 1 from jsonb_array_elements(cur_pack) e where (e->>'hp')::int > 0);
-
-      if not any_alive then
-        -- pack cleared: rewards are summed from every member's ORIGINAL
-        -- xp/gold (those fields never mutate — only 'hp' does), scaled by
-        -- how much harder the player's own selections made this fight.
-        select coalesce(sum((e->>'xp')::int), 0), coalesce(sum((e->>'gold')::int), 0)
-          into pack_xp, pack_gold from jsonb_array_elements(cur_pack) e;
-        pack_xp := round(pack_xp * reward_mult);
-        pack_gold := round(pack_gold * reward_mult);
-
-        round_log := round_log || jsonb_build_array(jsonb_build_object(
-          'hits', round_hits, 'pack', cur_pack,
-          'player_hp', cur_player_hp, 'player_max_hp', cur_player_max_hp,
-          'event', 'kill', 'xp_gained', pack_xp, 'gold_gained', pack_gold
-        ));
-
-        total_kills := total_kills + 1;
-        total_xp := total_xp + pack_xp;
-        total_gold := total_gold + pack_gold;
-
-        cur_pack := apply_hp_mod(roll_pack(p_enemy_key, p.sel_pack_size, p.sel_banishment_bracket), hp_pct);
-        exit exchanges; -- back to the battles loop to decide whether to start another
-      end if;
-
-      -- every still-alive pack member swings back this round — more
-      -- enemies alive means more incoming hits per round, which is what
-      -- makes Number of Enemies Spawned a real difficulty knob rather than
-      -- just a bigger shared hp pool.
-      for i in 0 .. jsonb_array_length(cur_pack) - 1 loop
-        member := cur_pack -> i;
-        if (member->>'hp')::int > 0 then
-          select * into hit from compute_damage((member->>'attack')::numeric, 0, p.defense::numeric, enemy_mods, player_mods);
-          cur_player_hp := greatest(0, cur_player_hp - hit.dmg);
+      -- Multi Strike: a bonus swing that CASCADES to the next still-alive
+      -- member (re-hitting the same one if it's the last one standing) —
+      -- this is what makes the stat directly valuable against a pack,
+      -- not just a flat extra hit on a single target.
+      if random() < (greatest(0, p.multi_strike + mod_val(player_mods, 'multi_strike_flat')) / 100.0) then
+        select min(idx - 1) into target_idx
+          from jsonb_array_elements(cur_pack) with ordinality as t(elem, idx)
+          where (elem->>'hp')::int > 0;
+        if target_idx is not null then
+          member := cur_pack -> target_idx;
+          select * into hit from compute_damage(p.attack, p.crit, (member->>'defense')::numeric, player_mods, enemy_mods);
+          cur_pack := jsonb_set(cur_pack, array[target_idx::text, 'hp'],
+            to_jsonb(greatest(0, (member->>'hp')::int - hit.dmg)));
+          total_damage := total_damage + hit.dmg;
           round_hits := round_hits || jsonb_build_array(jsonb_build_object(
-            'source', 'enemy', 'source_slot', i, 'dmg', hit.dmg, 'crit', hit.was_crit
+            'source', 'player', 'target', target_idx, 'dmg', hit.dmg, 'crit', hit.was_crit, 'multi_strike', true
           ));
         end if;
-      end loop;
-
-      if cur_player_hp <= 0 then
-        -- pack wiped the player — WIN-ONLY REWARDS: nothing is granted
-        -- here, only on a clear above. Still a tracked, reported outcome,
-        -- not a silent reset. Full heal (to this fight's effective cap)
-        -- and a fresh pack, same selections/affixes/debuffs — no other
-        -- penalty (a TUNE spot once that becomes a real feature).
-        round_log := round_log || jsonb_build_array(jsonb_build_object(
-          'hits', round_hits, 'pack', cur_pack,
-          'player_hp', 0, 'player_max_hp', cur_player_max_hp, 'event', 'death'
-        ));
-
-        total_deaths := total_deaths + 1;
-        cur_player_hp := cur_player_max_hp;
-        cur_pack := apply_hp_mod(roll_pack(p_enemy_key, p.sel_pack_size, p.sel_banishment_bracket), hp_pct);
-        exit exchanges;
       end if;
+    end if;
 
-      -- an ordinary round: still fighting, everything carries into the next.
+    any_alive := exists (select 1 from jsonb_array_elements(cur_pack) e where (e->>'hp')::int > 0);
+
+    if not any_alive then
+      -- pack cleared: rewards are summed from every member's ORIGINAL
+      -- xp/gold (those fields never mutate — only 'hp' does), scaled by
+      -- how much harder the player's own selections made this fight.
+      select coalesce(sum((e->>'xp')::int), 0), coalesce(sum((e->>'gold')::int), 0)
+        into pack_xp, pack_gold from jsonb_array_elements(cur_pack) e;
+      pack_xp := round(pack_xp * reward_mult);
+      pack_gold := round(pack_gold * reward_mult);
+
       round_log := round_log || jsonb_build_array(jsonb_build_object(
         'hits', round_hits, 'pack', cur_pack,
-        'player_hp', cur_player_hp, 'player_max_hp', cur_player_max_hp, 'event', null
+        'player_hp', cur_player_hp, 'player_max_hp', cur_player_max_hp,
+        'event', 'kill', 'xp_gained', pack_xp, 'gold_gained', pack_gold
       ));
-    end loop exchanges;
-  end loop battles;
+
+      total_kills := total_kills + 1;
+      total_xp := total_xp + pack_xp;
+      total_gold := total_gold + pack_gold;
+
+      -- roll the next pack now so it's ready and waiting, but STOP here —
+      -- this tick's fight is over the moment the pack clears, even with
+      -- rounds left in the budget. Fighting it is next tick's job.
+      cur_pack := apply_hp_mod(roll_pack(p_enemy_key, p.sel_pack_size, p.sel_banishment_bracket), hp_pct);
+      exit exchanges;
+    end if;
+
+    -- every still-alive pack member swings back this round — more
+    -- enemies alive means more incoming hits per round, which is what
+    -- makes Number of Enemies Spawned a real difficulty knob rather than
+    -- just a bigger shared hp pool.
+    for i in 0 .. jsonb_array_length(cur_pack) - 1 loop
+      member := cur_pack -> i;
+      if (member->>'hp')::int > 0 then
+        select * into hit from compute_damage((member->>'attack')::numeric, 0, p.defense::numeric, enemy_mods, player_mods);
+        cur_player_hp := greatest(0, cur_player_hp - hit.dmg);
+        round_hits := round_hits || jsonb_build_array(jsonb_build_object(
+          'source', 'enemy', 'source_slot', i, 'dmg', hit.dmg, 'crit', hit.was_crit
+        ));
+      end if;
+    end loop;
+
+    if cur_player_hp <= 0 then
+      -- pack wiped the player — WIN-ONLY REWARDS: nothing is granted
+      -- here, only on a clear above. Still a tracked, reported outcome,
+      -- not a silent reset. Full heal (to this fight's effective cap)
+      -- and a fresh pack, same selections/affixes/debuffs — no other
+      -- penalty (a TUNE spot once that becomes a real feature). Then STOP
+      -- — same reasoning as the pack-cleared branch above: this tick's
+      -- fight is over the instant the player dies, not a chance for the
+      -- leftover budget to kill them again against the freshly-rolled pack.
+      round_log := round_log || jsonb_build_array(jsonb_build_object(
+        'hits', round_hits, 'pack', cur_pack,
+        'player_hp', 0, 'player_max_hp', cur_player_max_hp, 'event', 'death'
+      ));
+
+      total_deaths := total_deaths + 1;
+      cur_player_hp := cur_player_max_hp;
+      cur_pack := apply_hp_mod(roll_pack(p_enemy_key, p.sel_pack_size, p.sel_banishment_bracket), hp_pct);
+      exit exchanges;
+    end if;
+
+    -- an ordinary round: still fighting, everything carries into the next.
+    round_log := round_log || jsonb_build_array(jsonb_build_object(
+      'hits', round_hits, 'pack', cur_pack,
+      'player_hp', cur_player_hp, 'player_max_hp', cur_player_max_hp, 'event', null
+    ));
+  end loop exchanges;
 
   update profiles
     set hp = cur_player_hp,
@@ -1478,9 +1531,9 @@ declare
   retain_pct numeric;      -- fraction, e.g. 0.0025 for 0.25%
   display_pct numeric;     -- same tier, as the percent number shown to players
   prowess_gain bigint;
-  base_attack int := 1;    -- TUNE: matches profiles.attack's default for a fresh character
-  base_defense int := 1;   -- TUNE: matches profiles.defense's default
-  base_max_hp int := 10;   -- TUNE: matches profiles.max_hp's default
+  base_attack int := 8;    -- TUNE: matches profiles.attack's default for a fresh character
+  base_defense int := 6;   -- TUNE: matches profiles.defense's default
+  base_max_hp int := 30;   -- TUNE: matches profiles.max_hp's default
   new_attack int;
   new_defense int;
   new_max_hp int;
@@ -2221,23 +2274,31 @@ on conflict (key) do update set name = excluded.name, description = excluded.des
 -- keyed off profiles.class — NOT applied to the profiles.attack/defense/
 -- max_hp/crit/multi_strike columns themselves. Every class shares the same
 -- base columns; the bonus only ever shows up in combat math. That's
--- deliberate: those base stats start tiny (attack=1, defense=1, hp=10), so
--- a flat percent of them would mostly round away to nothing at level 1 —
--- applying the bonus at combat-resolution time instead means it's real
--- immediately (crit/multi-strike bonuses especially, since those start at
--- 0) and it keeps scaling correctly forever as attack/defense/hp grow from
--- Banishment retention and (eventually) gear, with zero extra plumbing.
--- multi_strike_flat is a new mods key (flat percentage-point add to
--- profiles.multi_strike) — Multi Strike's roll happens directly in
--- strike_enemy() rather than inside compute_damage(), so it's read there
--- explicitly rather than via compute_damage's p_atk_mods.
+-- deliberate: applying the bonus at combat-resolution time means it's real
+-- immediately (crit/multi-strike/attack-speed bonuses especially, since
+-- those start at 0/1.0) and it keeps scaling correctly forever as
+-- attack/defense/hp grow from Banishment retention and (eventually) gear,
+-- with zero extra plumbing — and it's why the profiles.attack/defense/
+-- max_hp baseline just above was raised from 1/1/10 to 8/6/30: large enough
+-- that a +5-20% bonus actually shows up in the rounded output from level 1,
+-- not just once those columns have grown from later progression.
+-- multi_strike_flat is a flat percentage-point add to profiles.multi_strike
+-- — Multi Strike's roll happens directly in strike_enemy() rather than
+-- inside compute_damage(), so it's read there explicitly rather than via
+-- compute_damage's p_atk_mods. attack_speed_pct works the same way, read
+-- directly in strike_enemy() to scale the pack round budget.
+-- Every class bonus below is intentionally a POSITIVE percentage only — no
+-- class carries a downside. As gear/Banishment later push the underlying
+-- base stats up, each class's flat percentages become correspondingly
+-- stronger in absolute terms with no extra work, which is the whole point
+-- of doing this as a percent modifier rather than a fixed bonus.
 insert into class_defs (key, name, description, mods) values
   ('warrior', 'Warrior', '+5% HP, +5% Defense, +5% Power',
     '{"hp_pct": 5, "defense_pct": 5, "attack_pct": 5}'::jsonb),
-  ('archer',  'Archer',  '+10% Crit, +10% Power, -5% Defense',
-    '{"crit_chance_flat": 10, "attack_pct": 10, "defense_pct": -5}'::jsonb),
-  ('magi',    'Magi',    '+10% Multi Strike, +10% Crit, +5% Power, -20% Defense',
-    '{"multi_strike_flat": 10, "crit_chance_flat": 10, "attack_pct": 5, "defense_pct": -20}'::jsonb),
-  ('striker', 'Striker', '+20% Multi Strike, +20% Crit, -10% Defense',
-    '{"multi_strike_flat": 20, "crit_chance_flat": 20, "defense_pct": -10}'::jsonb)
+  ('archer',  'Archer',  '+10% Crit, +10% Power, +5% Attack Speed',
+    '{"crit_chance_flat": 10, "attack_pct": 10, "attack_speed_pct": 5}'::jsonb),
+  ('magi',    'Magi',    '+10% Multi Strike, +10% Crit, +5% Power, +5% HP',
+    '{"multi_strike_flat": 10, "crit_chance_flat": 10, "attack_pct": 5, "hp_pct": 5}'::jsonb),
+  ('striker', 'Striker', '+20% Multi Strike, +20% Crit, +5% Attack Speed',
+    '{"multi_strike_flat": 20, "crit_chance_flat": 20, "attack_speed_pct": 5}'::jsonb)
 on conflict (key) do update set name = excluded.name, description = excluded.description, mods = excluded.mods;

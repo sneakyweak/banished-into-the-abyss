@@ -9,6 +9,7 @@
   --accent-bright: #c084fc;
   --danger: #e05252;
   --good: #4caf6d;
+  --gold: #e8c547;
 }
 
 * { box-sizing: border-box; }
@@ -490,6 +491,45 @@ button:disabled { opacity: 0.4; cursor: not-allowed; }
 .stat-label { color: var(--dim); }
 .stat-list span:last-child { color: var(--accent-bright); font-weight: bold; }
 
+/* Hover tooltips for the sidebar's stat keywords (Depth, Power, Crit,
+   etc.) and the Additional Affixes heading -- CSS-only via data-tooltip so
+   no JS/markup beyond the attribute itself is needed. .stat-label already
+   sits at the left edge of its row (see .stat-list li above), so the
+   tooltip opens flush with that same left edge instead of centering and
+   risking an overflow out of the ~260px sidebar. */
+[data-tooltip] { position: relative; cursor: help; border-bottom: 1px dotted var(--dim); }
+[data-tooltip]::after {
+  content: attr(data-tooltip);
+  position: absolute;
+  left: 0;
+  bottom: 100%;
+  margin-bottom: 7px;
+  background: #17111f;
+  color: var(--text);
+  border: 1px solid var(--border);
+  padding: 7px 10px;
+  border-radius: 6px;
+  font-size: 0.72rem;
+  font-weight: normal;
+  line-height: 1.4;
+  width: max-content;
+  max-width: 200px;
+  white-space: normal;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.5);
+  opacity: 0;
+  visibility: hidden;
+  transform: translateY(4px);
+  transition: opacity 0.15s ease, transform 0.15s ease;
+  z-index: 40;
+  pointer-events: none;
+}
+[data-tooltip]:hover::after,
+[data-tooltip]:focus-visible::after {
+  opacity: 1;
+  visibility: visible;
+  transform: translateY(0);
+}
+
 /* Battle panel */
 
 .battle-arena {
@@ -563,11 +603,26 @@ button:disabled { opacity: 0.4; cursor: not-allowed; }
   border-radius: 7px;
   display: block;
 }
+/* Player side no longer shows a portrait here (redundant with the avatar
+   already on screen elsewhere) -- visibility:hidden keeps the same box
+   dimensions reserved (so the name/HP bar below still lines up with the
+   enemy pack's cards, which DO keep their art slot) without drawing the
+   dashed border/background a real slot has. */
+.battle-mob-slot-spacer {
+  border-color: transparent;
+  background: transparent;
+  visibility: hidden;
+}
 .battle-side .hp-bar { width: 100%; }
 .battle-hp-text { font-size: 0.75rem; color: var(--dim); }
 .hp-bar { background: #2a1f36; border-radius: 4px; height: 16px; overflow: hidden; margin: 8px 0 4px; }
 .hp-fill { background: linear-gradient(90deg, var(--danger), #ff8a5b); height: 100%; width: 100%; transition: width 0.3s; }
 .hp-fill-player { background: linear-gradient(90deg, var(--good), #7fe0a0); }
+
+.xp-bar-wrap { margin-top: 10px; }
+.xp-bar { background: #2a1f36; border: 1px solid var(--border); border-radius: 4px; height: 14px; overflow: hidden; }
+.xp-fill { background: linear-gradient(90deg, #9c7714, var(--gold)); height: 100%; width: 0%; transition: width 0.3s; }
+.xp-bar-text { font-size: 0.7rem; color: var(--dim); text-align: center; margin-top: 3px; }
 
 .active-modifiers { min-height: 1.2em; font-size: 0.78rem; color: var(--accent-bright); }
 
@@ -593,7 +648,8 @@ button:disabled { opacity: 0.4; cursor: not-allowed; }
   color: var(--dim);
   text-align: left;
 }
-.encounter-setting select {
+.encounter-setting select,
+.encounter-setting input[type="number"] {
   background: #0c0a10;
   border: 1px solid var(--border);
   color: var(--text);
@@ -601,6 +657,14 @@ button:disabled { opacity: 0.4; cursor: not-allowed; }
   border-radius: 4px;
   font-family: inherit;
   font-size: 0.85rem;
+  width: 100%;
+  box-sizing: border-box;
+}
+.encounter-setting input[type="number"] {
+  /* keep the native up/down spinner (still the fastest way to nudge by 1)
+     but let typed manual entry work too -- no appearance override needed
+     beyond making sure the field isn't stretched wider than its label. */
+  max-width: 140px;
 }
 
 #member-list { list-style: none; padding: 0; margin: 0 0 10px; font-size: 0.85rem; color: var(--dim); }
