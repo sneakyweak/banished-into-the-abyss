@@ -51,8 +51,8 @@ body {
   border-bottom: 1px solid var(--border);
   backdrop-filter: blur(2px);
 }
-.brand-compact { display: flex; align-items: baseline; gap: 6px; font-family: 'Cinzel', serif; }
-.brand-compact-line { font-size: 0.75rem; letter-spacing: 2px; color: var(--dim); text-transform: uppercase; }
+.brand-compact { display: flex; flex-direction: column; align-items: flex-start; gap: 0; line-height: 1.15; }
+.brand-compact-line { font-size: 0.7rem; letter-spacing: 2px; color: var(--dim); }
 .brand-compact-abyss {
   font-size: 1.05rem;
   font-weight: 700;
@@ -60,6 +60,7 @@ body {
   color: var(--accent-bright);
   text-shadow: 0 0 8px #a855f7, 0 0 18px #7c3aed;
 }
+.topbar-right { display: flex; align-items: center; gap: 12px; }
 .who { color: var(--dim); font-size: 0.85rem; }
 
 /* ---------------------------------------------------------------------- */
@@ -69,10 +70,8 @@ body {
 .hero-title {
   text-align: center;
   margin: 48px auto 28px;
-  font-family: 'Cinzel', serif;
 }
 .hero-line {
-  text-transform: uppercase;
   color: var(--text);
 }
 .hero-banished {
@@ -164,18 +163,14 @@ body {
 }
 
 .panel-title {
-  font-family: 'Cinzel', serif;
   font-size: 1rem;
-  letter-spacing: 2px;
-  text-transform: uppercase;
+  letter-spacing: 1px;
   color: var(--accent-bright);
   margin: 0 0 12px;
 }
 .panel-subtitle {
-  font-family: 'Cinzel', serif;
   font-size: 0.85rem;
-  letter-spacing: 1.5px;
-  text-transform: uppercase;
+  letter-spacing: 0.5px;
   color: var(--dim);
   margin: 0 0 10px;
 }
@@ -216,7 +211,6 @@ body {
 .class-card .class-name {
   font-size: 0.75rem;
   letter-spacing: 1px;
-  text-transform: uppercase;
   color: var(--dim);
 }
 .class-card:hover { border-color: var(--accent); }
@@ -294,8 +288,7 @@ button:disabled { opacity: 0.4; cursor: not-allowed; }
 }
 .page-pill {
   font-size: 0.75rem;
-  letter-spacing: 1px;
-  text-transform: uppercase;
+  letter-spacing: 0.5px;
   padding: 5px 12px;
   border-radius: 999px;
   border: 1px solid var(--border);
@@ -362,6 +355,40 @@ button:disabled { opacity: 0.4; cursor: not-allowed; }
 }
 .overlay-close:hover { border-color: var(--accent); color: var(--text); }
 
+.banish-tiers { list-style: none; margin: 12px 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
+.banish-tiers li { display: flex; justify-content: space-between; font-size: 0.85rem; border-bottom: 1px dotted var(--border); padding-bottom: 4px; }
+.banish-tiers li span:last-child { color: var(--accent-bright); font-weight: bold; }
+
+.guild-heading-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.guild-heading-row h4 { margin: 0; }
+.cogwheel-btn {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--accent-bright);
+  width: 32px;
+  height: 32px;
+  min-width: 32px;
+  padding: 0;
+  border-radius: 6px;
+  font-size: 1.15rem;
+  line-height: 1;
+  cursor: pointer;
+  text-shadow: 0 0 8px rgba(168, 85, 247, 0.7);
+}
+.cogwheel-btn:hover { border-color: var(--accent); box-shadow: 0 0 10px rgba(168, 85, 247, 0.45); opacity: 1; }
+
+.rank-editor-list { list-style: none; margin: 10px 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+.rank-editor-list li { display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; font-size: 0.85rem; border-bottom: 1px dotted var(--border); padding-bottom: 6px; }
+.rank-editor-list .rank-name { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rank-editor-list select {
+  background: #0c0a10; border: 1px solid var(--border); color: var(--text);
+  padding: 4px 6px; border-radius: 4px; font-family: inherit; font-size: 0.8rem;
+}
+.rank-editor-list .btn-make-leader { font-size: 0.75rem; padding: 6px 8px; }
+
+.btn-danger { background: var(--danger); }
+.btn-danger:hover { opacity: 0.85; }
+
 /* ---------------------------------------------------------------------- */
 /* Game layout                                                             */
 /* ---------------------------------------------------------------------- */
@@ -377,8 +404,8 @@ button:disabled { opacity: 0.4; cursor: not-allowed; }
   gap: 0;
 }
 .sidebar { grid-area: sidebar; }
-.battle-panel { grid-area: battle; }
-.chat-panel { grid-area: chat; }
+.battle-panel { grid-area: battle; margin-bottom: 0; }
+.chat-panel { grid-area: chat; margin-top: 0; }
 .equipment-panel { grid-area: equipment; }
 .inventory-panel { grid-area: inventory; }
 
@@ -431,7 +458,15 @@ button:disabled { opacity: 0.4; cursor: not-allowed; }
   width: 200px;
   min-width: 0;
 }
-.battle-side .avatar-glyph { font-size: 2rem; }
+.battle-side .avatar-glyph {
+  width: 64px;
+  height: 64px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 2rem;
+  line-height: 1;
+}
 .enemy-glyph { color: var(--danger); text-shadow: 0 0 14px rgba(224, 82, 82, 0.55); }
 .battle-name {
   font-weight: bold;
@@ -442,7 +477,6 @@ button:disabled { opacity: 0.4; cursor: not-allowed; }
 }
 .battle-sub { font-size: 0.75rem; color: var(--dim); }
 .battle-vs {
-  font-family: 'Cinzel', serif;
   font-size: 0.8rem;
   letter-spacing: 2px;
   color: var(--dim);
@@ -521,7 +555,7 @@ button:disabled { opacity: 0.4; cursor: not-allowed; }
   justify-content: center;
   opacity: 0.55;
 }
-.equip-slot-label { font-size: 0.75rem; letter-spacing: 1px; text-transform: uppercase; color: var(--dim); }
+.equip-slot-label { font-size: 0.75rem; letter-spacing: 0.5px; color: var(--dim); }
 
 /* Inventory */
 

@@ -19,7 +19,7 @@ create table if not exists profiles (
   level            int not null default 1,
   xp               bigint not null default 0,
   gold             bigint not null default 0,
-  shards           bigint not null default 0,     -- prestige currency
+  abyssal_prowess  bigint not null default 0,     -- prestige currency, earned via Banishment (see perform_banishment)
   class            text not null default 'warrior' check (class in ('warrior','archer','magi','striker')),
   depth            int not null default 0,         -- prestige tier ("how deep")
   hp               int not null default 100,        -- current hp (solo combat)
@@ -46,6 +46,25 @@ alter table profiles add column if not exists max_actions int not null default 3
 alter table profiles add column if not exists hp int not null default 100;
 alter table profiles add column if not exists class text not null default 'warrior'
   check (class in ('warrior','archer','magi','striker'));
+
+-- rename the old "shards" column to "abyssal_prowess" (same values, clearer
+-- name now that it's the currency driving Banishment's retention tiers).
+-- Guarded so this is a no-op both on a project that's already been renamed
+-- and on a brand new project (whose CREATE TABLE above already names the
+-- column abyssal_prowess directly).
+do $$
+begin
+  if exists (
+    select 1 from information_schema.columns
+    where table_schema = 'public' and table_name = 'profiles' and column_name = 'shards'
+  ) and not exists (
+    select 1 from information_schema.columns
+    where table_schema = 'public' and table_name = 'profiles' and column_name = 'abyssal_prowess'
+  ) then
+    alter table profiles rename column shards to abyssal_prowess;
+  end if;
+end $$;
+alter table profiles add column if not exists abyssal_prowess bigint not null default 0;
 
 create table if not exists guilds (
   id          uuid primary key default gen_random_uuid(),
@@ -450,6 +469,14 @@ begin
 end;
 $$;
 
+-- Postgres can't CREATE OR REPLACE a function onto a different return
+-- signature — a project that already ran an earlier version of this file
+-- (before actions_left/out_of_actions existed below) needs the old one
+-- dropped first, or this whole statement fails with "cannot change return
+-- type of existing function" and the old, un-action-gated strike_enemy
+-- stays live. Safe no-op on a project that's never defined it.
+drop function if exists strike_enemy(text);
+
 create or replace function strike_enemy(p_enemy_key text default 'test_rat')
 returns table (
   damage_dealt int,
@@ -512,7 +539,9 @@ begin
   end if;
 
   new_player_hp := p.hp;
-  if not defeated then
+  if defeated then
+    new_player_hp := p.max_hp; -- full heal: a new fight (the respawned enemy) starts fresh
+  else
     new_player_hp := greatest(0, p.hp - e.attack);
     if new_player_hp <= 0 then
       new_player_hp := p.max_hp; -- basic "knocked out, back on your feet" reset — no penalty yet
@@ -541,6 +570,102 @@ begin
   end if;
 
   return query select dmg, defeated, new_enemy_hp, e.max_hp, new_player_hp, p.max_hp, gained_xp, gained_gold, new_actions, false;
+end;
+$$;
+
+-- ----------------------------------------------------------------------------
+-- 4d. Banishment (prestige)
+--    At level 100+ a player may sacrifice their character to the Abyss:
+--    level/xp/gold reset and inventory/current-fight state are wiped, but
+--    they keep Abyssal Prowess (a permanent meta-currency, +1 Depth per
+--    banishment) plus a slice of their current attack/defense/max_hp,
+--    sized by how much Abyssal Prowess they'd already banked BEFORE this
+--    banishment. Every constant below is a first-pass number — TUNE once
+--    this is actually playtested.
+-- ----------------------------------------------------------------------------
+
+create table if not exists banishments (
+  id              bigint generated always as identity primary key,
+  profile_id      uuid not null references profiles(id) on delete cascade,
+  level_reached   int not null,
+  prowess_gained  bigint not null,
+  retained_pct    numeric not null,   -- stored as a percent, e.g. 0.25, 0.5, 0.75, 100
+  created_at      timestamptz not null default now()
+);
+create index if not exists idx_banishments_profile on banishments(profile_id, created_at desc);
+
+alter table banishments enable row level security;
+drop policy if exists "banishment history is publicly readable" on banishments;
+create policy "banishment history is publicly readable" on banishments for select using (true);
+
+create or replace function perform_banishment()
+returns profiles
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  p profiles%rowtype;
+  retain_pct numeric;      -- fraction, e.g. 0.0025 for 0.25%
+  display_pct numeric;     -- same tier, as the percent number shown to players
+  prowess_gain bigint;
+  base_attack int := 10;   -- TUNE: matches profiles.attack's default for a fresh character
+  base_defense int := 5;   -- TUNE: matches profiles.defense's default
+  base_max_hp int := 100;  -- TUNE: matches profiles.max_hp's default
+  new_attack int;
+  new_defense int;
+  new_max_hp int;
+begin
+  select * into p from profiles where id = auth.uid() for update;
+  if not found then raise exception 'no profile'; end if;
+
+  if p.level < 100 then
+    raise exception 'you must reach level 100 before you can banish your character';
+  end if;
+
+  -- retention tier is based on Abyssal Prowess already banked from PAST
+  -- banishments, not this one — the more you've banished before, the more
+  -- of this run carries into the next.
+  if p.abyssal_prowess >= 1001 then
+    retain_pct := 1.0;      display_pct := 100;
+  elsif p.abyssal_prowess >= 501 then
+    retain_pct := 0.0075;   display_pct := 0.75;
+  elsif p.abyssal_prowess >= 100 then
+    retain_pct := 0.005;    display_pct := 0.50;
+  else
+    retain_pct := 0.0025;   display_pct := 0.25;
+  end if;
+
+  -- TUNE: prowess earned per banishment — simple level-based formula for now
+  prowess_gain := greatest(1, floor(p.level / 10.0));
+
+  new_attack  := greatest(base_attack,  base_attack  + floor((p.attack  - base_attack)  * retain_pct));
+  new_defense := greatest(base_defense, base_defense + floor((p.defense - base_defense) * retain_pct));
+  new_max_hp  := greatest(base_max_hp,  base_max_hp  + floor((p.max_hp  - base_max_hp)  * retain_pct));
+
+  insert into banishments (profile_id, level_reached, prowess_gained, retained_pct)
+  values (p.id, p.level, prowess_gain, display_pct);
+
+  update profiles set
+    level           = 1,
+    xp              = 0,
+    gold            = 0,
+    depth           = depth + 1,             -- each banishment pushes you one Depth deeper
+    abyssal_prowess = abyssal_prowess + prowess_gain,
+    attack          = new_attack,
+    defense         = new_defense,
+    max_hp          = new_max_hp,
+    hp              = new_max_hp,
+    actions         = max_actions,
+    last_tick_at    = now(),
+    last_active_at  = now()
+  where id = p.id
+  returning * into p;
+
+  delete from inventory where profile_id = p.id;
+  delete from player_combat where profile_id = p.id;
+
+  return p;
 end;
 $$;
 
@@ -723,8 +848,100 @@ language plpgsql
 security definer
 set search_path = public
 as $$
+declare
+  my_role text;
 begin
+  select role into my_role from guild_members where profile_id = auth.uid();
+  if my_role is null then
+    return; -- not in a guild — no-op, matches prior behavior
+  end if;
+  if my_role = 'leader' then
+    raise exception 'transfer leadership to another member before leaving, or disband the guild instead';
+  end if;
   delete from guild_members where profile_id = auth.uid();
+end;
+$$;
+
+-- ----------------------------------------------------------------------------
+-- 6b. Guild management: ranks, leadership transfer, disband
+--    Leader-only. A guild always has exactly one leader (enforced here, not
+--    by a DB constraint): set_member_rank only moves players between
+--    'officer'/'member', transfer_leadership is the only way the 'leader'
+--    role ever changes hands, and leave_guild (above) refuses to let the
+--    leader leave without transferring first — that's what makes the
+--    Leave-button-disabled-for-leaders UI in app.js a real guarantee and
+--    not just a client-side nicety.
+-- ----------------------------------------------------------------------------
+
+create or replace function set_member_rank(p_profile_id uuid, p_role text)
+returns void
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  my_guild_id uuid;
+  my_role text;
+  target_role text;
+begin
+  select gm.guild_id, gm.role into my_guild_id, my_role from guild_members gm where gm.profile_id = auth.uid();
+  if my_guild_id is null then raise exception 'you are not in a guild'; end if;
+  if my_role <> 'leader' then raise exception 'only the guild leader can assign ranks'; end if;
+
+  if p_role not in ('officer', 'member') then
+    raise exception 'rank must be officer or member';
+  end if;
+
+  select role into target_role from guild_members where guild_id = my_guild_id and profile_id = p_profile_id;
+  if target_role is null then raise exception 'that player is not in your guild'; end if;
+  if target_role = 'leader' then raise exception 'use transfer_leadership to change the guild leader'; end if;
+
+  update guild_members set role = p_role where guild_id = my_guild_id and profile_id = p_profile_id;
+end;
+$$;
+
+create or replace function transfer_leadership(p_new_leader_id uuid)
+returns void
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  my_guild_id uuid;
+  my_role text;
+  target_role text;
+begin
+  select gm.guild_id, gm.role into my_guild_id, my_role from guild_members gm where gm.profile_id = auth.uid();
+  if my_guild_id is null then raise exception 'you are not in a guild'; end if;
+  if my_role <> 'leader' then raise exception 'only the guild leader can transfer leadership'; end if;
+  if p_new_leader_id = auth.uid() then raise exception 'you are already the leader'; end if;
+
+  select role into target_role from guild_members where guild_id = my_guild_id and profile_id = p_new_leader_id;
+  if target_role is null then raise exception 'that player is not in your guild'; end if;
+
+  -- outgoing leader steps down to officer rather than plain member — they
+  -- just ran the guild, no reason to drop them straight to the bottom rank
+  update guild_members set role = 'officer' where guild_id = my_guild_id and profile_id = auth.uid();
+  update guild_members set role = 'leader' where guild_id = my_guild_id and profile_id = p_new_leader_id;
+  update guilds set leader_id = p_new_leader_id where id = my_guild_id;
+end;
+$$;
+
+create or replace function disband_guild()
+returns void
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  my_guild_id uuid;
+  my_role text;
+begin
+  select gm.guild_id, gm.role into my_guild_id, my_role from guild_members gm where gm.profile_id = auth.uid();
+  if my_guild_id is null then raise exception 'you are not in a guild'; end if;
+  if my_role <> 'leader' then raise exception 'only the guild leader can disband the guild'; end if;
+
+  delete from guilds where id = my_guild_id; -- cascades to guild_members, guild_bosses, guild_boss_damage_log
 end;
 $$;
 

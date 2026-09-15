@@ -8,6 +8,7 @@ const state = {
   profile: null,
   selectedClass: null, // 'warrior' | 'archer' | 'magi' | 'striker' — chosen on the auth screen before signup
   guild: null,        // { id, name, tag, ... }
+  myRole: null,       // this player's role in state.guild: 'leader' | 'officer' | 'member' | null
   members: [],
   boss: null,
   enemy: null,         // { enemy_key, enemy_hp, name, max_hp, attack, xp_reward, gold_reward }
@@ -137,6 +138,8 @@ async function enterGame(user) {
   $("auth-screen").classList.add("hidden");
   $("game-screen").classList.remove("hidden");
 
+  $("btn-signout").classList.remove("hidden");
+
   await loadProfile();
   await loadGuildMembership();
   await loadInventory();
@@ -164,6 +167,7 @@ function leaveGame() {
   state.guild = null;
   state.selectedClass = null;
   document.querySelectorAll(".class-card").forEach((c) => c.classList.remove("selected"));
+  $("btn-signout").classList.add("hidden");
   $("game-screen").classList.add("hidden");
   $("auth-screen").classList.remove("hidden");
 }
@@ -198,7 +202,7 @@ function renderProfile() {
   $("stat-level").textContent = p.level;
   $("stat-xp").textContent = p.xp;
   $("stat-gold").textContent = p.gold;
-  $("stat-shards").textContent = p.shards;
+  $("stat-prowess").textContent = p.abyssal_prowess;
   $("stat-attack").textContent = p.attack;
   $("stat-actions").textContent = p.actions;
   $("stat-max-actions").textContent = p.max_actions;
@@ -349,6 +353,56 @@ $("guild-overlay").addEventListener("click", (e) => {
   if (e.target.id === "guild-overlay") $("guild-overlay").classList.add("hidden"); // click on backdrop closes it
 });
 
+// ---------------------------------------------------------------------------
+// Banishment (prestige) — sacrifice the character at level 100+ for
+// Abyssal Prowess plus a slice of current stats carried into the next run.
+// The retention tiers below are cosmetic display only; the real numbers are
+// computed and enforced server-side in perform_banishment() (schema.sql).
+// ---------------------------------------------------------------------------
+
+function retentionPctForProwess(prowess) {
+  if (prowess >= 1001) return 100;
+  if (prowess >= 501) return 0.75;
+  if (prowess >= 100) return 0.5;
+  return 0.25;
+}
+
+function renderBanishOverlay() {
+  const p = state.profile;
+  if (!p) return;
+  $("banish-level").textContent = p.level;
+  $("banish-prowess").textContent = p.abyssal_prowess;
+  $("banish-pct").textContent = `${retentionPctForProwess(p.abyssal_prowess)}%`;
+  const eligible = p.level >= 100;
+  $("btn-perform-banish").disabled = !eligible;
+  $("banish-lock-note").classList.toggle("hidden", eligible);
+  $("banish-error").textContent = "";
+}
+
+$("nav-banish-btn").addEventListener("click", () => {
+  renderBanishOverlay();
+  $("banish-overlay").classList.remove("hidden");
+});
+$("btn-close-banish-overlay").addEventListener("click", () => {
+  $("banish-overlay").classList.add("hidden");
+});
+$("banish-overlay").addEventListener("click", (e) => {
+  if (e.target.id === "banish-overlay") $("banish-overlay").classList.add("hidden");
+});
+
+$("btn-perform-banish").addEventListener("click", async () => {
+  if (!confirm("Sacrifice your character to the Abyss? This cannot be undone.")) return;
+  const { error } = await sb.rpc("perform_banishment");
+  if (error) {
+    $("banish-error").textContent = error.message;
+    return;
+  }
+  $("banish-overlay").classList.add("hidden");
+  await loadProfile();
+  await loadInventory();
+  await loadEnemy();
+});
+
 async function loadGuildMembership() {
   const { data: membership } = await sb
     .from("guild_members")
@@ -358,12 +412,15 @@ async function loadGuildMembership() {
 
   if (!membership) {
     state.guild = null;
+    state.myRole = null;
     $("no-guild").classList.remove("hidden");
     $("in-guild").classList.add("hidden");
+    $("guild-settings").classList.add("hidden");
     await loadGuildList();
     return;
   }
 
+  state.myRole = membership.role;
   const { data: guild } = await sb.from("guilds").select("*").eq("id", membership.guild_id).single();
   state.guild = guild;
   $("no-guild").classList.add("hidden");
@@ -413,6 +470,25 @@ $("btn-leave-guild").addEventListener("click", async () => {
   await loadGuildMembership();
 });
 
+// ---------------------------------------------------------------------------
+// Guild settings — leader-only: assign officer/member ranks, hand off
+// leadership, or disband. The leader can't leave via the normal Leave
+// button (server-side guard in leave_guild() rejects it too) since a guild
+// always needs exactly one leader; they have to transfer it here first.
+// ---------------------------------------------------------------------------
+
+$("btn-guild-settings").addEventListener("click", () => {
+  $("guild-settings").classList.toggle("hidden");
+});
+
+$("btn-disband-guild").addEventListener("click", async () => {
+  if (!confirm("Disband your guild? This permanently deletes it for every member and cannot be undone.")) return;
+  const { error } = await sb.rpc("disband_guild");
+  if (error) return alert(error.message);
+  $("guild-settings").classList.add("hidden");
+  await loadGuildMembership();
+});
+
 async function loadMembers() {
   if (!state.guild) return;
   const { data } = await sb
@@ -420,6 +496,10 @@ async function loadMembers() {
     .select("role, profile_id, profiles(username, level, depth)")
     .eq("guild_id", state.guild.id);
   state.members = data || [];
+  renderMembers();
+}
+
+function renderMembers() {
   const ul = $("member-list");
   ul.innerHTML = "";
   state.members.forEach((m) => {
@@ -428,6 +508,64 @@ async function loadMembers() {
     li.textContent = `${m.profiles.username} — Lv${m.profiles.level}, Depth ${m.profiles.depth} (${m.role})`;
     ul.appendChild(li);
   });
+
+  const isLeader = state.myRole === "leader";
+  $("btn-guild-settings").classList.toggle("hidden", !isLeader);
+  $("btn-leave-guild").classList.toggle("hidden", isLeader);
+  $("leader-leave-note").classList.toggle("hidden", !isLeader);
+  if (!isLeader) $("guild-settings").classList.add("hidden");
+
+  renderRankEditor();
+}
+
+function renderRankEditor() {
+  const ul = $("rank-editor-list");
+  ul.innerHTML = "";
+  if (state.myRole !== "leader") return;
+
+  state.members
+    .filter((m) => m.role !== "leader")
+    .forEach((m) => {
+      const li = document.createElement("li");
+
+      const label = document.createElement("span");
+      label.className = "rank-name";
+      label.textContent = `${m.profiles.username} (${m.role})`;
+
+      const select = document.createElement("select");
+      [["member", "Member"], ["officer", "Officer"]].forEach(([value, text]) => {
+        const opt = document.createElement("option");
+        opt.value = value;
+        opt.textContent = text;
+        if (value === m.role) opt.selected = true;
+        select.appendChild(opt);
+      });
+      select.addEventListener("change", async () => {
+        const { error } = await sb.rpc("set_member_rank", { p_profile_id: m.profile_id, p_role: select.value });
+        if (error) {
+          alert(error.message);
+          select.value = m.role;
+          return;
+        }
+        await loadMembers();
+      });
+
+      const makeLeaderBtn = document.createElement("button");
+      makeLeaderBtn.type = "button";
+      makeLeaderBtn.className = "btn-ghost btn-make-leader";
+      makeLeaderBtn.textContent = "Make Leader";
+      makeLeaderBtn.addEventListener("click", async () => {
+        if (!confirm(`Hand off guild leadership to ${m.profiles.username}? You'll become an officer.`)) return;
+        const { error } = await sb.rpc("transfer_leadership", { p_new_leader_id: m.profile_id });
+        if (error) return alert(error.message);
+        await loadGuildMembership();
+      });
+
+      li.appendChild(label);
+      li.appendChild(select);
+      li.appendChild(makeLeaderBtn);
+      ul.appendChild(li);
+    });
 }
 
 async function refreshBoss() {

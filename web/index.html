@@ -4,9 +4,6 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Banished Into The Abyss</title>
-  <link rel="preconnect" href="https://fonts.googleapis.com" />
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-  <link href="https://fonts.googleapis.com/css2?family=Cinzel:wght@500;700;900&display=swap" rel="stylesheet" />
   <link rel="stylesheet" href="css/style.css" />
 </head>
 <body>
@@ -15,10 +12,15 @@
 
   <header class="topbar">
     <div class="brand-compact">
-      <span class="brand-compact-line">Banished Into The</span>
+      <span class="brand-compact-line">Banished</span>
+      <span class="brand-compact-line">Into</span>
+      <span class="brand-compact-line">The</span>
       <span class="brand-compact-abyss">Abyss</span>
     </div>
-    <div id="who" class="who"></div>
+    <div class="topbar-right">
+      <button id="btn-signout" class="btn-ghost hidden">Sign Out</button>
+      <div id="who" class="who"></div>
+    </div>
   </header>
 
   <!-- ============ AUTH SCREEN ============ -->
@@ -76,6 +78,7 @@
     <nav class="page-nav">
       <span class="page-pill active">World</span>
       <button type="button" id="nav-guild-btn" class="page-pill active">Guild</button>
+      <button type="button" id="nav-banish-btn" class="page-pill active">Banish</button>
       <span class="page-pill active">Character</span>
       <span class="page-pill soon">Party<i>soon</i></span>
       <span class="page-pill soon">Trade<i>soon</i></span>
@@ -92,14 +95,13 @@
         <li><span class="stat-label">Level</span><span id="stat-level">1</span></li>
         <li><span class="stat-label">Experience</span><span id="stat-xp">0</span></li>
         <li><span class="stat-label">Gold</span><span id="stat-gold">0</span></li>
-        <li><span class="stat-label">Abyssal Shards</span><span id="stat-shards">0</span></li>
+        <li><span class="stat-label">Abyssal Prowess</span><span id="stat-prowess">0</span></li>
         <li><span class="stat-label">Attack</span><span id="stat-attack">0</span></li>
         <li><span class="stat-label">Actions</span><span><span id="stat-actions">0</span>/<span id="stat-max-actions">0</span></span></li>
       </ul>
 
       <div class="sidebar-buttons">
         <button id="btn-refresh-actions">Refresh Actions</button>
-        <button id="btn-signout" class="btn-ghost">Sign Out</button>
       </div>
     </aside>
 
@@ -192,11 +194,55 @@
         <button id="btn-refresh-guilds">Refresh guild list</button>
       </div>
       <div id="in-guild" class="hidden">
-        <h4 id="guild-heading">—</h4>
+        <div class="guild-heading-row">
+          <h4 id="guild-heading">—</h4>
+          <button type="button" id="btn-guild-settings" class="cogwheel-btn hidden" title="Guild Settings" aria-label="Guild Settings">&#9881;</button>
+        </div>
         <p class="log">Members</p>
         <ul id="member-list"></ul>
+
+        <div id="guild-settings" class="hidden">
+          <div class="panel-divider"></div>
+          <h3 class="panel-subtitle">Guild Settings</h3>
+          <p class="log">Assign ranks or hand leadership to another member. Only the leader sees this panel.</p>
+          <ul id="rank-editor-list" class="rank-editor-list"></ul>
+          <div class="panel-divider"></div>
+          <button type="button" id="btn-disband-guild" class="btn-danger">Disband Guild</button>
+        </div>
+
+        <div class="panel-divider"></div>
         <button id="btn-leave-guild" class="btn-ghost">Leave guild</button>
+        <p id="leader-leave-note" class="log hidden">You're the guild leader — hand off leadership above before you can leave, or disband the guild instead.</p>
       </div>
+    </div>
+  </div>
+
+  <!-- ============ BANISHMENT OVERLAY ============ -->
+  <div id="banish-overlay" class="overlay hidden">
+    <div class="panel overlay-panel">
+      <button type="button" id="btn-close-banish-overlay" class="overlay-close" aria-label="Close">&times;</button>
+      <h2 class="panel-title">Banishment</h2>
+      <p class="log">
+        At level 100 you may sacrifice your character to the Abyss. Banishing resets your
+        character to level 1, but permanently grants Abyssal Prowess and carries a slice of
+        your current stats into your next life. The more Abyssal Prowess you've banked from
+        past banishments, the more of your run survives the next one.
+      </p>
+      <ul class="banish-tiers">
+        <li><span>Abyssal Prowess 1 – 99</span><span>0.25% retained</span></li>
+        <li><span>Abyssal Prowess 100 – 500</span><span>0.50% retained</span></li>
+        <li><span>Abyssal Prowess 501 – 1000</span><span>0.75% retained</span></li>
+        <li><span>Abyssal Prowess 1001+</span><span>100% retained</span></li>
+      </ul>
+      <div class="panel-divider"></div>
+      <ul class="stat-list">
+        <li><span class="stat-label">Your Level</span><span id="banish-level">1</span></li>
+        <li><span class="stat-label">Abyssal Prowess</span><span id="banish-prowess">0</span></li>
+        <li><span class="stat-label">Retention This Banishment</span><span id="banish-pct">0.25%</span></li>
+      </ul>
+      <button id="btn-perform-banish" disabled>Banish Your Character</button>
+      <p id="banish-error" class="error"></p>
+      <p id="banish-lock-note" class="log">Reach level 100 to unlock banishment.</p>
     </div>
   </div>
 
