@@ -1063,16 +1063,38 @@ function formatDuration(totalSeconds) {
 // gold_gained/elapsed_seconds here are exactly what THIS ONE catch-up call
 // covered, not a running total. Never called from the periodic tick loop,
 // so it can never show up mid-session.
+//
+// xp_gained/gold_gained are the combined passive-trickle + offline-combat
+// total (see perform_idle_tick() in schema.sql) -- nothing else to do here
+// to pick that up. combat_kills/combat_deaths are new: perform_idle_tick()
+// now actually fights through elapsed offline time (spending actions, same
+// as if the tab had been open), so a long-enough absence can report real
+// kills, and occasionally a death or two, not just idle income.
 function maybeShowWelcomeBackSummary(idleRow) {
   if (!idleRow) return;
   if (Number(idleRow.elapsed_seconds) < WELCOME_BACK_MIN_SECONDS) return;
   const xp = Number(idleRow.xp_gained) || 0;
   const gold = Number(idleRow.gold_gained) || 0;
+  const kills = Number(idleRow.combat_kills) || 0;
+  const deaths = Number(idleRow.combat_deaths) || 0;
   if (xp <= 0 && gold <= 0) return; // nothing actually earned (e.g. a brand-new character's first load)
 
-  $("welcome-back-away-time").textContent = `You were away for ${formatDuration(idleRow.elapsed_seconds)}.`;
+  let awayText = `You were away for ${formatDuration(idleRow.elapsed_seconds)}.`;
+  if (deaths > 0) {
+    awayText += ` You fell in battle ${deaths} time${deaths === 1 ? "" : "s"} while gone.`;
+  }
+  $("welcome-back-away-time").textContent = awayText;
   $("welcome-back-xp").textContent = xp.toLocaleString();
   $("welcome-back-gold").textContent = gold.toLocaleString();
+
+  const killsRow = $("welcome-back-kills-row");
+  if (kills > 0) {
+    $("welcome-back-kills").textContent = kills.toLocaleString();
+    killsRow?.classList.remove("hidden");
+  } else {
+    killsRow?.classList.add("hidden");
+  }
+
   $("welcome-back-overlay")?.classList.remove("hidden");
 }
 

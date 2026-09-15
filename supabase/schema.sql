@@ -834,91 +834,17 @@ $$;
 --    Tune the constants marked TUNE once you have something playable.
 -- ----------------------------------------------------------------------------
 
-drop function if exists perform_idle_tick();
-
-create or replace function perform_idle_tick()
-returns table (
-  xp_gained bigint, gold_gained bigint, new_level int, boss_damage bigint,
-  daily_dmg_dealt int, daily_dmg_taken int, daily_kills int, daily_deaths int,
-  daily_idle_xp int, daily_idle_gold int, daily_reset_at date,
-  elapsed_seconds bigint -- how long since last_tick_at this call actually
-                          -- covered (capped at max_offline_seconds) -- lets
-                          -- the client tell "just reloaded the page" apart
-                          -- from "was away for hours" when deciding whether
-                          -- to show a welcome-back summary (see doTick/
-                          -- maybeShowWelcomeBackSummary in app.js)
-)
-language plpgsql
-security definer
-set search_path = public
-as $$
-declare
-  p profiles%rowtype;
-  elapsed_seconds bigint;
-  max_offline_seconds bigint := 72 * 3600; -- TUNE: cap offline gains at 72h
-  xp_per_second numeric := 0.5;            -- TUNE
-  gold_per_second numeric := 0.3;          -- TUNE
-  depth_multiplier numeric;
-  gained_xp bigint;
-  gained_gold bigint;
-  lvl int;
-  dmg bigint := 0; -- guild bosses are disabled for now (see 4c below); kept
-                    -- in the return signature so callers don't need to change
-  daily record;
-begin
-  select * into p from profiles where id = auth.uid();
-  if not found then
-    raise exception 'no profile for current user';
-  end if;
-
-  elapsed_seconds := least(extract(epoch from (now() - p.last_tick_at))::bigint, max_offline_seconds);
-  if elapsed_seconds <= 0 then
-    select * into daily from bump_daily_stats(); -- still refreshes/resets the daily snapshot, adds nothing
-    return query select 0::bigint, 0::bigint, p.level, 0::bigint,
-      daily.daily_dmg_dealt, daily.daily_dmg_taken, daily.daily_kills, daily.daily_deaths,
-      daily.daily_idle_xp, daily.daily_idle_gold, daily.daily_reset_at,
-      greatest(0, elapsed_seconds);
-    return;
-  end if;
-
-  depth_multiplier := 1 + (p.depth * 0.5); -- TUNE: each Depth is +50% base income
-  gained_xp := floor(elapsed_seconds * xp_per_second * depth_multiplier);
-  gained_gold := floor(elapsed_seconds * gold_per_second * depth_multiplier);
-
-  -- greatest(p.level, ...): XP loss (e.g. strike_enemy()'s death penalty,
-  -- which docks xp but never touches level directly) must never delevel a
-  -- character -- level can only ever go up here, never recompute downward
-  -- just because xp dropped since the last time this ran.
-  lvl := greatest(p.level, 1, floor(sqrt((p.xp + gained_xp) / 100.0))::int); -- TUNE: level curve
-
-  update profiles
-    set xp = xp + gained_xp,
-        gold = gold + gained_gold,
-        level = lvl,
-        last_tick_at = now(),
-        last_active_at = now()
-    where id = p.id;
-
-  select * into daily from bump_daily_stats(p_idle_xp := gained_xp::int, p_idle_gold := gained_gold::int);
-
-  -- guild bosses are disabled for now — no idle damage is fed to them.
-  return query select gained_xp, gained_gold, lvl, dmg,
-    daily.daily_dmg_dealt, daily.daily_dmg_taken, daily.daily_kills, daily.daily_deaths,
-    daily.daily_idle_xp, daily.daily_idle_gold, daily.daily_reset_at,
-    elapsed_seconds;
-end;
-$$;
-
 -- ----------------------------------------------------------------------------
 -- 4b. Action points
---    Every character starts at 3000/3000. Nothing spends them yet (no
---    action cost is wired into any RPC below) — this is just the pool and
---    the manual "refresh" the player clicks to top back up to max_actions.
---    There's deliberately no cooldown on refresh_actions() yet: since
---    nothing costs actions right now, refreshing has no effect to limit.
---    Once training/delving/crafting (see DESIGN.md) actually spend from
---    this pool, refresh should probably get gated (a cooldown, a real-time
---    regen rate, or a gold cost) or the pool stops meaning anything.
+--    Every character starts at 3000/3000. Spent by strike_enemy() (1 per
+--    fight-tick while online) and, since perform_idle_tick() grew offline
+--    combat simulation above, by offline catch-up too -- both draw from the
+--    same profiles.actions pool. refresh_actions() below is the manual
+--    "refresh" the player clicks to top back up to max_actions. There's
+--    deliberately no cooldown on refresh_actions(): actions themselves are
+--    the throttle (a full pool still only buys so many fight-ticks), so
+--    gating the refresh button on top wouldn't add a real limit, just
+--    friction.
 -- ----------------------------------------------------------------------------
 
 create or replace function refresh_actions()
@@ -1019,7 +945,7 @@ $$;
 --    WIN/LOSS: xp and gold are only ever granted when a pack is fully
 --    cleared (event = 'kill') — never on a player death. Every individual
 --    enemy killed (not just the one that empties the pack) also heals the
---    player 10% of their (fight-effective) max HP, applied the instant
+--    player 25% of their (fight-effective) max HP, applied the instant
 --    that kill lands, whether it's the player's primary swing or a Multi
 --    Strike bonus swing. A death fully heals the player and respawns a
 --    fresh pack (same selections), same as before, but grants nothing.
@@ -1537,49 +1463,56 @@ begin
 end;
 $$;
 
--- same reasoning as the drop above this signature has changed more than
--- once now (single-swing -> level-driven rounds -> pack combat -> and now
--- dropping the enemy-key argument entirely, since which mobs spawn is
--- rolled server-side per pack member in roll_pack() rather than chosen by
--- the caller -- the drop below (same "(text)" arg-type signature as the
--- p_enemy_key version) already covers this transition too).
-drop function if exists strike_enemy(text);
-
-create or replace function strike_enemy()
-returns table (
-  rounds_fought int,
+-- Shared combat core, extracted from what used to be strike_enemy()'s whole
+-- body so the exact same one-action-worth-of-fighting logic can run from two
+-- places: strike_enemy() itself (one call, while the player is online and
+-- actively polling) and perform_idle_tick()'s offline-catch-up loop below
+-- (many calls in a row, simulating actions spent while the player was away).
+-- Pure in the sense that matters here: it never touches the database itself
+-- (no reads/writes to profiles/player_combat) and never calls auth.uid() --
+-- everything it needs comes in as arguments, and everything it produces
+-- comes back in the returned row. That's what lets a caller run it N times
+-- in a tight loop with only the running totals kept in memory, then persist
+-- once at the end, instead of one DB round-trip per action.
+drop type if exists combat_action_result cascade;
+create type combat_action_result as (
+  cur_pack jsonb,
+  new_affix_keys jsonb,
+  new_debuff_keys jsonb,
+  cur_player_hp int,
+  cur_player_max_hp int,
+  rounds_run int,
   damage_dealt int,
+  damage_taken int,
   kills int,
   deaths int,
-  player_hp int,
-  player_max_hp int,
   xp_gained int,
   gold_gained int,
-  actions_left int,
-  out_of_actions boolean,
-  rounds_log jsonb,
-  final_pack jsonb,
-  affix_names jsonb,
-  debuff_names jsonb,
   xp_lost int,
   gold_lost int,
-  daily_dmg_dealt int,
-  daily_dmg_taken int,
-  daily_kills int,
-  daily_deaths int,
-  daily_idle_xp int,
-  daily_idle_gold int,
-  daily_reset_at date
+  round_log jsonb
+);
+
+-- p is the player's profiles row (read-only here -- its gold/xp/hp columns
+-- are NOT what's mutated; p_cur_player_hp is the actual "current hp" input,
+-- and gold/xp deltas come back via the returned xp_gained/gold_gained/
+-- xp_lost/gold_lost for the caller to apply). p_build_log lets a caller
+-- skip round-by-round jsonb log construction (strike_enemy() wants it for
+-- client playback; perform_idle_tick()'s offline loop, which can run this
+-- hundreds of times in one call, does not).
+create or replace function resolve_combat_action(
+  p profiles,
+  p_cur_pack jsonb,
+  p_cur_player_hp int,
+  p_affix_keys jsonb,
+  p_debuff_keys jsonb,
+  p_build_log boolean default true
 )
+returns combat_action_result
 language plpgsql
-security definer
-set search_path = public
 as $$
 declare
-  p profiles%rowtype;
-  pc player_combat%rowtype;
-  cooldown interval := interval '1 second'; -- TUNE: just enough to stop double-fires
-  action_cost int := 1;        -- flat per fight-tick, regardless of how many rounds it takes
+  res combat_action_result;
   base_rounds int := 10;       -- TUNE: new-pack budget at attack_speed = 1.0 (the default)
   rounds_soft_budget int;      -- once crossed, no NEW pack starts — but the current one still finishes
   rounds_hard_cap int := 25;   -- absolute ceiling across the whole call so this can never hang
@@ -1587,7 +1520,6 @@ declare
   cur_pack jsonb;
   cur_player_hp int;
   cur_player_max_hp int;
-  cur_actions int;
   total_damage int := 0;
   total_damage_taken int := 0;
   total_kills int := 0;
@@ -1598,12 +1530,12 @@ declare
   total_gold_lost int := 0;
   penalty_gold int;
   penalty_xp int;
-  daily record;
   -- one entry per round actually fought, in order, so the client can play
   -- combat back round-by-round instead of only ever seeing the state after
   -- everything (including any clear/death respawn) has already resolved.
   -- Each entry reflects the whole pack's hp right after that round's
   -- blows, BEFORE any clear/death respawn resets things for the next pack.
+  -- Only populated when p_build_log is true.
   round_log jsonb := '[]'::jsonb;
   round_hits jsonb;
   debuff_mod_bundles jsonb;
@@ -1616,7 +1548,6 @@ declare
   target_idx int;
   member jsonb;
   hit record;
-  i int;
   any_alive boolean;
   pack_xp int;
   pack_gold int;
@@ -1636,51 +1567,22 @@ declare
   -- (pack cleared, or either death branch) reassigns these to a brand-new
   -- random draw before rolling the next pack, so a fresh enemy really does
   -- mean fresh modifiers rather than reusing whatever get_or_spawn_pack()
-  -- rolled once when this player_combat row was first created. Persisted
-  -- back to player_combat at the very end either way (unchanged is still a
-  -- write, just a no-op one).
+  -- rolled once when this player_combat row was first created. Returned to
+  -- the caller either way (unchanged is still a value to persist, just a
+  -- no-op one).
   new_affix_keys jsonb;
   new_debuff_keys jsonb;
 begin
-  select * into p from profiles where id = auth.uid() for update;
-  if not found then raise exception 'no profile'; end if;
-
-  select * into pc from player_combat where profile_id = auth.uid();
-
-  -- this fires automatically every idle tick (unattended), so both the
-  -- "out of actions" and "on cooldown" cases return a quiet no-op row
-  -- instead of raising — an exception every 8s would just spam the client.
-  if p.actions < action_cost then
-    select * into daily from bump_daily_stats(); -- still refreshes/resets the daily snapshot, adds nothing
-    return query select 0, 0, 0, 0, p.hp, p.max_hp, 0, 0, p.actions, true,
-      '[]'::jsonb, coalesce(pc.pack, '[]'::jsonb), '[]'::jsonb, '[]'::jsonb, 0, 0,
-      daily.daily_dmg_dealt, daily.daily_dmg_taken, daily.daily_kills, daily.daily_deaths,
-      daily.daily_idle_xp, daily.daily_idle_gold, daily.daily_reset_at;
-    return;
-  end if;
-
-  if pc.last_strike_at is not null and pc.last_strike_at + cooldown > now() then
-    select * into daily from bump_daily_stats();
-    return query select 0, 0, 0, 0, p.hp, p.max_hp, 0, 0, p.actions, false,
-      '[]'::jsonb, coalesce(pc.pack, '[]'::jsonb), '[]'::jsonb, '[]'::jsonb, 0, 0,
-      daily.daily_dmg_dealt, daily.daily_dmg_taken, daily.daily_kills, daily.daily_deaths,
-      daily.daily_idle_xp, daily.daily_idle_gold, daily.daily_reset_at;
-    return;
-  end if;
-
-  perform get_or_spawn_pack(); -- ensures a live pack (and its affixes/debuffs) exists
-  select * into pc from player_combat where profile_id = auth.uid();
-  new_affix_keys := pc.affix_keys;
-  new_debuff_keys := pc.debuff_keys;
+  new_affix_keys := p_affix_keys;
+  new_debuff_keys := p_debuff_keys;
 
   select coalesce(jsonb_agg(mods), '[]'::jsonb) into debuff_mod_bundles
-    from debuff_defs where key in (select jsonb_array_elements_text(pc.debuff_keys));
+    from debuff_defs where key in (select jsonb_array_elements_text(p_debuff_keys));
   select coalesce(jsonb_agg(mods), '[]'::jsonb) into affix_mod_bundles
-    from affix_defs where key in (select jsonb_array_elements_text(pc.affix_keys));
+    from affix_defs where key in (select jsonb_array_elements_text(p_affix_keys));
   select coalesce(mods, '{}'::jsonb) into class_mods from class_defs where key = p.class;
   player_mods := sum_mods(debuff_mod_bundles || jsonb_build_array(coalesce(class_mods, '{}'::jsonb)));
   enemy_mods := sum_mods(affix_mod_bundles);
-  hp_pct := mod_val(enemy_mods, 'hp_pct');
 
   -- attack_speed_pct (a class-bonus-only key so far -- see class_defs) is
   -- a percent bonus to the player's raw attack_speed column, applied here
@@ -1701,13 +1603,12 @@ begin
   cur_player_speed := greatest(1, p.speed * (1 + mod_val(player_mods, 'speed_pct') / 100.0));
   cur_player_evasion_pct := least(25, greatest(0, p.speed + mod_val(player_mods, 'evasion_flat')));
 
-  cur_pack := pc.pack;
+  cur_pack := p_cur_pack;
   -- a self-imposed hp_pct debuff temporarily lowers the player's effective
   -- ceiling for THIS fight only — never written back to profiles.max_hp —
   -- so current hp is clamped down to match if it's currently above that.
   cur_player_max_hp := greatest(1, round(p.max_hp * (1 + mod_val(player_mods, 'hp_pct') / 100.0))::int);
-  cur_player_hp := least(p.hp, cur_player_max_hp);
-  cur_actions := p.actions - action_cost; -- spent once, up front, no matter how the fight goes
+  cur_player_hp := least(p_cur_player_hp, cur_player_max_hp);
 
   -- ONE fight (one pack) per call, multiple ROUNDS against it this tick —
   -- not one loop per pack. rounds_soft_budget (attack-speed-scaled) caps
@@ -1752,21 +1653,26 @@ begin
         -- full history/rationale of what this used to be). Kept as real
         -- variables computed the same way rather than deleting the
         -- mechanism, so re-tuning this back up later is a one-line change,
-        -- not rebuilding death handling from scratch. off p.gold/p.xp as
-        -- they stood when this call started — a death tick never also
-        -- earns a kill's reward in the same call (see the
-        -- single-event-per-tick banner comment above), so those are still
-        -- the player's true current totals at the moment they died.
+        -- not rebuilding death handling from scratch. Off p.gold/p.xp as
+        -- passed in by the caller -- strike_enemy() passes the player's
+        -- true current totals (a death tick never also earns a kill's
+        -- reward in the same call); perform_idle_tick()'s offline loop
+        -- passes a running total threaded across iterations so a string of
+        -- offline deaths, if this ever gets tuned back up, still compounds
+        -- correctly instead of every iteration penalizing the same
+        -- pre-loop snapshot.
         penalty_gold := floor(p.gold * 0.0);
         penalty_xp := floor(p.xp * 0.0);
         total_gold_lost := total_gold_lost + penalty_gold;
         total_xp_lost := total_xp_lost + penalty_xp;
 
-        round_log := round_log || jsonb_build_array(jsonb_build_object(
-          'hits', round_hits, 'pack', cur_pack,
-          'player_hp', 0, 'player_max_hp', cur_player_max_hp, 'event', 'death',
-          'gold_lost', penalty_gold, 'xp_lost', penalty_xp
-        ));
+        if p_build_log then
+          round_log := round_log || jsonb_build_array(jsonb_build_object(
+            'hits', round_hits, 'pack', cur_pack,
+            'player_hp', 0, 'player_max_hp', cur_player_max_hp, 'event', 'death',
+            'gold_lost', penalty_gold, 'xp_lost', penalty_xp
+          ));
+        end if;
         total_deaths := total_deaths + 1;
         cur_player_hp := cur_player_max_hp;
         -- New pack incoming -- reroll affixes/debuffs so it doesn't inherit
@@ -1797,13 +1703,13 @@ begin
       round_hits := round_hits || jsonb_build_array(jsonb_build_object(
         'source', 'player', 'target', target_idx, 'dmg', hit.dmg, 'crit', hit.was_crit, 'multi_strike', false
       ));
-      -- Kill heal: 10% of this fight's effective max HP, per pack member
+      -- Kill heal: 25% of this fight's effective max HP, per pack member
       -- killed (target_idx was only ever selected from hp>0 members above,
       -- so pre-swing hp is always >0 here -- a kill is exactly this swing's
       -- damage taking it to <=0). Rewards actually landing kills with a bit
       -- of breathing room, short of the full heal a death gives.
       if (member->>'hp')::int - hit.dmg <= 0 then
-        cur_player_hp := least(cur_player_max_hp, cur_player_hp + round(cur_player_max_hp * 0.10)::int);
+        cur_player_hp := least(cur_player_max_hp, cur_player_hp + round(cur_player_max_hp * 0.25)::int);
       end if;
 
       -- Multi Strike: a bonus swing that CASCADES to the next still-alive
@@ -1826,7 +1732,7 @@ begin
           -- same kill heal as the primary swing above -- multi strike can
           -- land its own separate kill this round.
           if (member->>'hp')::int - hit.dmg <= 0 then
-            cur_player_hp := least(cur_player_max_hp, cur_player_hp + round(cur_player_max_hp * 0.10)::int);
+            cur_player_hp := least(cur_player_max_hp, cur_player_hp + round(cur_player_max_hp * 0.25)::int);
           end if;
         end if;
       end if;
@@ -1844,15 +1750,17 @@ begin
       pack_gold := round(pack_gold * reward_mult);
 
       -- No separate heal here anymore -- the kill that just cleared this
-      -- pack already triggered its own 10% kill heal above (every kill
+      -- pack already triggered its own 25% kill heal above (every kill
       -- does now, not just the one that empties the pack), so cur_player_hp
       -- already reflects it by the time we log the round below.
 
-      round_log := round_log || jsonb_build_array(jsonb_build_object(
-        'hits', round_hits, 'pack', cur_pack,
-        'player_hp', cur_player_hp, 'player_max_hp', cur_player_max_hp,
-        'event', 'kill', 'xp_gained', pack_xp, 'gold_gained', pack_gold
-      ));
+      if p_build_log then
+        round_log := round_log || jsonb_build_array(jsonb_build_object(
+          'hits', round_hits, 'pack', cur_pack,
+          'player_hp', cur_player_hp, 'player_max_hp', cur_player_max_hp,
+          'event', 'kill', 'xp_gained', pack_xp, 'gold_gained', pack_gold
+        ));
+      end if;
 
       total_kills := total_kills + 1;
       total_xp := total_xp + pack_xp;
@@ -1897,12 +1805,7 @@ begin
         -- harder content until it works; Banishment difficulty scaling
         -- automatically now covers that same "don't overreach for free"
         -- role on its own, so dying no longer costs anything on top of it —
-        -- see the mirrored branch above for the same change). Off
-        -- p.gold/p.xp as they stood when this call started (a death tick
-        -- never also earns a kill's reward in the same call — see the
-        -- single-event-per-tick banner comment above — so those are still
-        -- the player's true current totals at the moment they died, for
-        -- whenever this gets tuned back up).
+        -- see the mirrored branch above for the same change).
         -- Then STOP — same reasoning as the pack-cleared branch above:
         -- this tick's fight is over the instant the player dies, not a
         -- chance for the leftover budget to kill them again against the
@@ -1912,11 +1815,13 @@ begin
         total_gold_lost := total_gold_lost + penalty_gold;
         total_xp_lost := total_xp_lost + penalty_xp;
 
-        round_log := round_log || jsonb_build_array(jsonb_build_object(
-          'hits', round_hits, 'pack', cur_pack,
-          'player_hp', 0, 'player_max_hp', cur_player_max_hp, 'event', 'death',
-          'gold_lost', penalty_gold, 'xp_lost', penalty_xp
-        ));
+        if p_build_log then
+          round_log := round_log || jsonb_build_array(jsonb_build_object(
+            'hits', round_hits, 'pack', cur_pack,
+            'player_hp', 0, 'player_max_hp', cur_player_max_hp, 'event', 'death',
+            'gold_lost', penalty_gold, 'xp_lost', penalty_xp
+          ));
+        end if;
 
         total_deaths := total_deaths + 1;
         cur_player_hp := cur_player_max_hp;
@@ -1934,34 +1839,326 @@ begin
     end if;
 
     -- an ordinary round: still fighting, everything carries into the next.
-    round_log := round_log || jsonb_build_array(jsonb_build_object(
-      'hits', round_hits, 'pack', cur_pack,
-      'player_hp', cur_player_hp, 'player_max_hp', cur_player_max_hp, 'event', null
-    ));
+    if p_build_log then
+      round_log := round_log || jsonb_build_array(jsonb_build_object(
+        'hits', round_hits, 'pack', cur_pack,
+        'player_hp', cur_player_hp, 'player_max_hp', cur_player_max_hp, 'event', null
+      ));
+    end if;
   end loop exchanges;
 
+  res.cur_pack := cur_pack;
+  res.new_affix_keys := new_affix_keys;
+  res.new_debuff_keys := new_debuff_keys;
+  res.cur_player_hp := cur_player_hp;
+  res.cur_player_max_hp := cur_player_max_hp;
+  res.rounds_run := rounds_run;
+  res.damage_dealt := total_damage;
+  res.damage_taken := total_damage_taken;
+  res.kills := total_kills;
+  res.deaths := total_deaths;
+  res.xp_gained := total_xp;
+  res.gold_gained := total_gold;
+  res.xp_lost := total_xp_lost;
+  res.gold_lost := total_gold_lost;
+  res.round_log := round_log;
+  return res;
+end;
+$$;
+
+drop function if exists perform_idle_tick();
+
+-- Offline catch-up: runs once whenever the client reconnects (see doTick()'s
+-- isInitial call in app.js), covering everything since last_tick_at. Grants
+-- the same passive per-second xp/gold trickle it always has, AND (see
+-- resolve_combat_action() above) now simulates real combat for however many
+-- actions the elapsed time and the player's action pool allow — the two
+-- stack, exactly like while online strike_enemy()'s combat rewards and this
+-- function's passive trickle already run independently on the same 8s cadence
+-- and simply add up. Before this, actions never ticked down while the tab
+-- was closed (nothing but the client-driven strike_enemy() ever spent them),
+-- which read as a bug once players noticed the pool never moved overnight.
+create or replace function perform_idle_tick()
+returns table (
+  xp_gained bigint, gold_gained bigint, new_level int, boss_damage bigint,
+  daily_dmg_dealt int, daily_dmg_taken int, daily_kills int, daily_deaths int,
+  daily_idle_xp int, daily_idle_gold int, daily_reset_at date,
+  elapsed_seconds bigint, -- how long since last_tick_at this call actually
+                          -- covered (capped at max_offline_seconds) -- lets
+                          -- the client tell "just reloaded the page" apart
+                          -- from "was away for hours" when deciding whether
+                          -- to show a welcome-back summary (see doTick/
+                          -- maybeShowWelcomeBackSummary in app.js)
+  combat_kills int,      -- this catch-up's own simulated kills/deaths/spend
+  combat_deaths int,     -- -- NOT the daily_* whole-day aggregates above,
+  actions_spent int       -- just what this one call simulated
+)
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  p profiles%rowtype;
+  sim_p profiles%rowtype; -- running copy threaded through the offline-combat
+                           -- loop below: only .gold/.xp are kept live (fed by
+                           -- each iteration's own combat gains/losses), so a
+                           -- string of simulated deaths -- if the death
+                           -- penalty is ever tuned back up off 0% -- still
+                           -- compounds against real running totals rather
+                           -- than every iteration penalizing the same
+                           -- pre-loop snapshot. Everything else about it is
+                           -- never read by resolve_combat_action() except as
+                           -- fixed character-sheet stats (attack/defense/
+                           -- class/etc.), which don't change mid-catch-up.
+  pc player_combat%rowtype;
+  elapsed_seconds bigint;
+  max_offline_seconds bigint := 72 * 3600; -- TUNE: cap offline gains at 72h
+  xp_per_second numeric := 0.5;            -- TUNE
+  gold_per_second numeric := 0.3;          -- TUNE
+  depth_multiplier numeric;
+  gained_xp bigint;
+  gained_gold bigint;
+  lvl int;
+  dmg bigint := 0; -- guild bosses are disabled for now (see 4c below); kept
+                    -- in the return signature so callers don't need to change
+  daily record;
+  -- Offline combat simulation: one simulated action per seconds_per_action
+  -- of real elapsed time, same cadence strike_enemy() runs at while online
+  -- (TICK_INTERVAL_MS in app.js) -- so a player who was away fights through
+  -- roughly the same pace of action they'd have spent watching the screen.
+  seconds_per_action int := 8; -- TUNE: keep in sync with TICK_INTERVAL_MS
+  n_actions int;
+  combat_pack jsonb;
+  combat_hp int;
+  combat_affix_keys jsonb;
+  combat_debuff_keys jsonb;
+  res combat_action_result;
+  combat_damage_dealt int := 0;
+  combat_damage_taken int := 0;
+  combat_kills int := 0;
+  combat_deaths int := 0;
+  combat_xp int := 0;
+  combat_gold int := 0;
+  combat_xp_lost int := 0;
+  combat_gold_lost int := 0;
+  i int;
+begin
+  select * into p from profiles where id = auth.uid() for update;
+  if not found then
+    raise exception 'no profile for current user';
+  end if;
+
+  elapsed_seconds := least(extract(epoch from (now() - p.last_tick_at))::bigint, max_offline_seconds);
+  if elapsed_seconds <= 0 then
+    select * into daily from bump_daily_stats(); -- still refreshes/resets the daily snapshot, adds nothing
+    return query select 0::bigint, 0::bigint, p.level, 0::bigint,
+      daily.daily_dmg_dealt, daily.daily_dmg_taken, daily.daily_kills, daily.daily_deaths,
+      daily.daily_idle_xp, daily.daily_idle_gold, daily.daily_reset_at,
+      greatest(0, elapsed_seconds), 0, 0, 0;
+    return;
+  end if;
+
+  depth_multiplier := 1 + (p.depth * 0.5); -- TUNE: each Depth is +50% base income
+  gained_xp := floor(elapsed_seconds * xp_per_second * depth_multiplier);
+  gained_gold := floor(elapsed_seconds * gold_per_second * depth_multiplier);
+
+  -- How many actions can this catch-up simulate? Capped by BOTH real
+  -- elapsed time (at one action per seconds_per_action) AND the player's
+  -- actual action pool -- an empty pool means no fighting happens no matter
+  -- how long they were away, same as if they'd been online and run dry.
+  n_actions := least(p.actions, floor(elapsed_seconds / seconds_per_action)::int);
+
+  sim_p := p;
+
+  if n_actions > 0 then
+    perform get_or_spawn_pack(); -- ensures a live pack (and its affixes/debuffs) exists
+    select * into pc from player_combat where profile_id = auth.uid();
+    combat_pack := pc.pack;
+    combat_hp := p.hp;
+    combat_affix_keys := pc.affix_keys;
+    combat_debuff_keys := pc.debuff_keys;
+
+    -- Run the same per-action combat core strike_enemy() uses, N times in a
+    -- row, entirely in memory -- no DB read/write per iteration, just one of
+    -- each after the loop. p_build_log := false: nobody's watching this
+    -- happen live, so skip building a per-round jsonb log across what could
+    -- be hundreds of iterations.
+    for i in 1..n_actions loop
+      res := resolve_combat_action(sim_p, combat_pack, combat_hp, combat_affix_keys, combat_debuff_keys, false);
+
+      combat_pack := res.cur_pack;
+      combat_hp := res.cur_player_hp;
+      combat_affix_keys := res.new_affix_keys;
+      combat_debuff_keys := res.new_debuff_keys;
+
+      combat_damage_dealt := combat_damage_dealt + res.damage_dealt;
+      combat_damage_taken := combat_damage_taken + res.damage_taken;
+      combat_kills := combat_kills + res.kills;
+      combat_deaths := combat_deaths + res.deaths;
+      combat_xp := combat_xp + res.xp_gained;
+      combat_gold := combat_gold + res.gold_gained;
+      combat_xp_lost := combat_xp_lost + res.xp_lost;
+      combat_gold_lost := combat_gold_lost + res.gold_lost;
+
+      sim_p.gold := greatest(0, sim_p.gold + res.gold_gained - res.gold_lost);
+      sim_p.xp := greatest(0, sim_p.xp + res.xp_gained - res.xp_lost);
+    end loop;
+  end if;
+
+  -- greatest(p.level, ...): XP loss (e.g. a death penalty, whether from
+  -- strike_enemy() or this function's own offline combat) must never delevel
+  -- a character -- level can only ever go up here, never recompute downward
+  -- just because xp dropped since the last time this ran.
+  lvl := greatest(p.level, 1, floor(sqrt((p.xp + gained_xp + combat_xp - combat_xp_lost) / 100.0))::int); -- TUNE: level curve
+
   update profiles
-    set hp = cur_player_hp,
-        xp = greatest(0, xp + total_xp - total_xp_lost),
-        gold = greatest(0, gold + total_gold - total_gold_lost),
+    set xp = greatest(0, xp + gained_xp + combat_xp - combat_xp_lost),
+        gold = greatest(0, gold + gained_gold + combat_gold - combat_gold_lost),
+        level = lvl,
+        hp = case when n_actions > 0 then combat_hp else hp end,
+        actions = case when n_actions > 0 then p.actions - n_actions else actions end,
+        last_tick_at = now(),
+        last_active_at = now()
+    where id = p.id;
+
+  select * into daily from bump_daily_stats(
+    p_dmg_dealt := combat_damage_dealt, p_dmg_taken := combat_damage_taken,
+    p_kills := combat_kills, p_deaths := combat_deaths,
+    p_idle_xp := gained_xp::int, p_idle_gold := gained_gold::int
+  );
+
+  -- only touch player_combat (and its last_strike_at, which strike_enemy()'s
+  -- own cooldown check reads) when this catch-up actually fought -- a quick
+  -- reload with no real elapsed time should never spuriously reset the
+  -- cooldown clock or touch an in-progress pack.
+  if n_actions > 0 then
+    update player_combat
+      set pack = combat_pack, affix_keys = combat_affix_keys, debuff_keys = combat_debuff_keys,
+          updated_at = now(), last_strike_at = now()
+      where profile_id = auth.uid();
+  end if;
+
+  -- guild bosses are disabled for now — no idle damage is fed to them.
+  -- xp_gained/gold_gained are the COMBINED total (passive trickle + gross
+  -- combat gains, not net of any combat loss -- same "gained" convention
+  -- strike_enemy() already uses, where xp_lost/gold_lost are reported
+  -- separately rather than pre-subtracted) so the client's existing Welcome
+  -- Back summary (maybeShowWelcomeBackSummary in app.js) keeps working
+  -- unchanged even though it can now include real combat rewards.
+  return query select gained_xp + combat_xp, gained_gold + combat_gold, lvl, dmg,
+    daily.daily_dmg_dealt, daily.daily_dmg_taken, daily.daily_kills, daily.daily_deaths,
+    daily.daily_idle_xp, daily.daily_idle_gold, daily.daily_reset_at,
+    elapsed_seconds, combat_kills, combat_deaths, n_actions;
+end;
+$$;
+
+-- same reasoning as the drop above this signature has changed more than
+-- once now (single-swing -> level-driven rounds -> pack combat -> and now
+-- dropping the enemy-key argument entirely, since which mobs spawn is
+-- rolled server-side per pack member in roll_pack() rather than chosen by
+-- the caller -- the drop below (same "(text)" arg-type signature as the
+-- p_enemy_key version) already covers this transition too).
+drop function if exists strike_enemy(text);
+
+-- Thin wrapper around resolve_combat_action() (see above): owns the DB I/O
+-- (one profiles/player_combat read, one action/cooldown gate, one write of
+-- each at the end) and the client-facing return shape; all the actual round-
+-- by-round fighting now lives in resolve_combat_action(), shared with
+-- perform_idle_tick()'s offline-catch-up loop.
+create or replace function strike_enemy()
+returns table (
+  rounds_fought int,
+  damage_dealt int,
+  kills int,
+  deaths int,
+  player_hp int,
+  player_max_hp int,
+  xp_gained int,
+  gold_gained int,
+  actions_left int,
+  out_of_actions boolean,
+  rounds_log jsonb,
+  final_pack jsonb,
+  affix_names jsonb,
+  debuff_names jsonb,
+  xp_lost int,
+  gold_lost int,
+  daily_dmg_dealt int,
+  daily_dmg_taken int,
+  daily_kills int,
+  daily_deaths int,
+  daily_idle_xp int,
+  daily_idle_gold int,
+  daily_reset_at date
+)
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  p profiles%rowtype;
+  pc player_combat%rowtype;
+  cooldown interval := interval '1 second'; -- TUNE: just enough to stop double-fires
+  action_cost int := 1;        -- flat per fight-tick, regardless of how many rounds it takes
+  cur_actions int;
+  daily record;
+  res combat_action_result;
+begin
+  select * into p from profiles where id = auth.uid() for update;
+  if not found then raise exception 'no profile'; end if;
+
+  select * into pc from player_combat where profile_id = auth.uid();
+
+  -- this fires automatically every idle tick (unattended), so both the
+  -- "out of actions" and "on cooldown" cases return a quiet no-op row
+  -- instead of raising — an exception every 8s would just spam the client.
+  if p.actions < action_cost then
+    select * into daily from bump_daily_stats(); -- still refreshes/resets the daily snapshot, adds nothing
+    return query select 0, 0, 0, 0, p.hp, p.max_hp, 0, 0, p.actions, true,
+      '[]'::jsonb, coalesce(pc.pack, '[]'::jsonb), '[]'::jsonb, '[]'::jsonb, 0, 0,
+      daily.daily_dmg_dealt, daily.daily_dmg_taken, daily.daily_kills, daily.daily_deaths,
+      daily.daily_idle_xp, daily.daily_idle_gold, daily.daily_reset_at;
+    return;
+  end if;
+
+  if pc.last_strike_at is not null and pc.last_strike_at + cooldown > now() then
+    select * into daily from bump_daily_stats();
+    return query select 0, 0, 0, 0, p.hp, p.max_hp, 0, 0, p.actions, false,
+      '[]'::jsonb, coalesce(pc.pack, '[]'::jsonb), '[]'::jsonb, '[]'::jsonb, 0, 0,
+      daily.daily_dmg_dealt, daily.daily_dmg_taken, daily.daily_kills, daily.daily_deaths,
+      daily.daily_idle_xp, daily.daily_idle_gold, daily.daily_reset_at;
+    return;
+  end if;
+
+  perform get_or_spawn_pack(); -- ensures a live pack (and its affixes/debuffs) exists
+  select * into pc from player_combat where profile_id = auth.uid();
+
+  cur_actions := p.actions - action_cost; -- spent once, up front, no matter how the fight goes
+
+  res := resolve_combat_action(p, pc.pack, p.hp, pc.affix_keys, pc.debuff_keys, true);
+
+  update profiles
+    set hp = res.cur_player_hp,
+        xp = greatest(0, xp + res.xp_gained - res.xp_lost),
+        gold = greatest(0, gold + res.gold_gained - res.gold_lost),
         actions = cur_actions
     where id = p.id;
 
   select * into daily from bump_daily_stats(
-    p_dmg_dealt := total_damage, p_dmg_taken := total_damage_taken,
-    p_kills := total_kills, p_deaths := total_deaths
+    p_dmg_dealt := res.damage_dealt, p_dmg_taken := res.damage_taken,
+    p_kills := res.kills, p_deaths := res.deaths
   );
 
   update player_combat
-    set pack = cur_pack, affix_keys = new_affix_keys, debuff_keys = new_debuff_keys,
+    set pack = res.cur_pack, affix_keys = res.new_affix_keys, debuff_keys = res.new_debuff_keys,
         updated_at = now(), last_strike_at = now()
     where profile_id = auth.uid();
 
-  return query select rounds_run, total_damage, total_kills, total_deaths, cur_player_hp, cur_player_max_hp,
-    total_xp, total_gold, cur_actions, false, round_log, cur_pack,
-    (select coalesce(jsonb_agg(name), '[]'::jsonb) from affix_defs where key in (select jsonb_array_elements_text(new_affix_keys))),
-    (select coalesce(jsonb_agg(name), '[]'::jsonb) from debuff_defs where key in (select jsonb_array_elements_text(new_debuff_keys))),
-    total_xp_lost, total_gold_lost,
+  return query select res.rounds_run, res.damage_dealt, res.kills, res.deaths, res.cur_player_hp, res.cur_player_max_hp,
+    res.xp_gained, res.gold_gained, cur_actions, false, res.round_log, res.cur_pack,
+    (select coalesce(jsonb_agg(name), '[]'::jsonb) from affix_defs where key in (select jsonb_array_elements_text(res.new_affix_keys))),
+    (select coalesce(jsonb_agg(name), '[]'::jsonb) from debuff_defs where key in (select jsonb_array_elements_text(res.new_debuff_keys))),
+    res.xp_lost, res.gold_lost,
     daily.daily_dmg_dealt, daily.daily_dmg_taken, daily.daily_kills, daily.daily_deaths,
     daily.daily_idle_xp, daily.daily_idle_gold, daily.daily_reset_at;
 end;

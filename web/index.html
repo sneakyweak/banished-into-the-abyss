@@ -481,6 +481,11 @@
       <ul class="stat-list">
         <li><span class="stat-label">XP Earned</span><span id="welcome-back-xp">0</span></li>
         <li><span class="stat-label">Gold Earned</span><span id="welcome-back-gold">0</span></li>
+        <!-- Only shown when perform_idle_tick()'s offline combat simulation
+             actually landed a kill during this catch-up -- hidden entirely
+             otherwise (e.g. the player had no actions left to spend, or was
+             only away a few seconds). -->
+        <li id="welcome-back-kills-row" class="hidden"><span class="stat-label">Enemies Defeated</span><span id="welcome-back-kills">0</span></li>
       </ul>
       <button id="btn-welcome-back-continue">Continue</button>
     </div>
@@ -511,8 +516,21 @@
        0.100) if the player explicitly asks for a bigger jump for that
        round. -->
   <script>
-    window.APP_VERSION = "0.005";
+    window.APP_VERSION = "0.007";
     window.PATCH_NOTES = [
+      {
+        "version": "0.007",
+        "notes": [
+          "Actions now keep ticking while you're offline -- logging back in simulates the fights you missed (spending actions, scoring kills, earning xp/gold) instead of just granting passive income.",
+          "The Welcome Back summary now reports enemies defeated while you were away."
+        ]
+      },
+      {
+        "version": "0.006",
+        "notes": [
+          "Killing an enemy now heals you for 25% of your max HP (was 10%)."
+        ]
+      },
       {
         "version": "0.005",
         "notes": [
