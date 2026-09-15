@@ -513,8 +513,22 @@ $$;
 --    perform_idle_tick()'s passive xp/gold, which is time-based and keeps
 --    accruing offline regardless of actions — only this auto-strike loop
 --    is action-gated (and, per the above, at a flat 1 action regardless of
---    how the fight goes). No real death penalty yet (hp just resets to
---    max) — a TUNE spot once this becomes a real feature.
+--    how the fight goes).
+--
+--    Every individual battle (one player vs. one spawned enemy) always
+--    runs to a real conclusion — someone dies — rather than being cut off
+--    partway through by the tick's round budget. That budget (rounds_to_run
+--    below, driven by Attack Speed) decides how many NEW battles get
+--    started this tick, but once a battle is underway it's always allowed
+--    to finish, so the round count can run a little over budget for the
+--    last one. A hard, unconditional ceiling (rounds_hard_cap) still
+--    bounds the absolute worst case so this function can never hang — in
+--    practice, with damage always flooring at 1 and both sides' hp finite,
+--    real fights finish long before that ceiling matters. A player "death"
+--    (hp hits 0) ends that battle exactly like a kill does — tallied,
+--    reported to the client as a real event, and the encounter respawns
+--    fresh — but still carries no other penalty (no xp/gold/item loss, full
+--    heal after) — a TUNE spot once that becomes a real feature.
 -- ----------------------------------------------------------------------------
 
 -- exactly 5% champion, 10% elite, 85% normal — a single random() draw
@@ -636,6 +650,7 @@ returns table (
   rounds_fought int,
   damage_dealt int,
   kills int,
+  deaths int,
   enemy_hp int,
   enemy_max_hp int,
   enemy_name text,
@@ -655,10 +670,10 @@ declare
   pc player_combat%rowtype;
   stats record;
   cooldown interval := interval '1 second'; -- TUNE: just enough to stop double-fires
-  action_cost int := 1;       -- flat per fight-tick, regardless of how many rounds it takes
-  base_rounds int := 10;      -- TUNE: rounds resolved at attack_speed = 1.0 (the default)
-  max_rounds_cap int := 100;  -- hard ceiling so one call can't run unbounded work
-  rounds_to_run int;
+  action_cost int := 1;        -- flat per fight-tick, regardless of how many rounds it takes
+  base_rounds int := 10;       -- TUNE: new-battle budget at attack_speed = 1.0 (the default)
+  rounds_soft_budget int;      -- once crossed, no NEW battle starts — but the current one still finishes
+  rounds_hard_cap int := 25;   -- absolute ceiling across the whole call so this can never hang
   rounds_run int := 0;
   hit_dmg int;
   cur_enemy_hp int;
@@ -669,6 +684,7 @@ declare
   cur_actions int;
   total_damage int := 0;
   total_kills int := 0;
+  total_deaths int := 0;
   total_xp int := 0;
   total_gold int := 0;
 begin
@@ -687,16 +703,16 @@ begin
   -- "out of actions" and "on cooldown" cases return a quiet no-op row
   -- instead of raising — an exception every 8s would just spam the client.
   if p.actions < action_cost then
-    return query select 0, 0, 0, pc.enemy_hp, stats.eff_max_hp, stats.display_name, p.hp, p.max_hp, 0, 0, p.actions, true;
+    return query select 0, 0, 0, 0, pc.enemy_hp, stats.eff_max_hp, stats.display_name, p.hp, p.max_hp, 0, 0, p.actions, true;
     return;
   end if;
 
   if pc.last_strike_at is not null and pc.last_strike_at + cooldown > now() then
-    return query select 0, 0, 0, pc.enemy_hp, stats.eff_max_hp, stats.display_name, p.hp, p.max_hp, 0, 0, p.actions, false;
+    return query select 0, 0, 0, 0, pc.enemy_hp, stats.eff_max_hp, stats.display_name, p.hp, p.max_hp, 0, 0, p.actions, false;
     return;
   end if;
 
-  rounds_to_run := least(max_rounds_cap, greatest(1, round(base_rounds * p.attack_speed)::int));
+  rounds_soft_budget := greatest(1, round(base_rounds * p.attack_speed)::int);
 
   cur_tier := pc.enemy_tier;
   cur_enemy_hp := pc.enemy_hp;
@@ -705,46 +721,66 @@ begin
   cur_player_hp := p.hp;
   cur_actions := p.actions - action_cost; -- spent once, up front, no matter how the fight goes
 
-  while rounds_run < rounds_to_run loop
-    rounds_run := rounds_run + 1;
+  -- outer loop: one iteration per BATTLE. Only starts a new battle while
+  -- under the soft budget; once a battle starts, the inner loop always
+  -- runs it to a real resolution (a kill or a death), never breaking off
+  -- partway through just because the budget ran out mid-fight.
+  <<battles>>
+  loop
+    exit battles when rounds_run >= rounds_soft_budget or rounds_run >= rounds_hard_cap;
 
-    -- player's swing: Power vs. the enemy's (tier-scaled) Defense, with a
-    -- Crit chance to double it
-    hit_dmg := greatest(1, p.attack - stats.eff_defense);
-    if random() < (p.crit / 100.0) then hit_dmg := hit_dmg * 2; end if;
-    cur_enemy_hp := greatest(0, cur_enemy_hp - hit_dmg);
-    total_damage := total_damage + hit_dmg;
+    <<exchanges>>
+    loop
+      exit battles when rounds_run >= rounds_hard_cap; -- absolute safety valve, even mid-battle
+      rounds_run := rounds_run + 1;
 
-    -- Multi Strike: a chance of a second swing landing in the same round
-    if cur_enemy_hp > 0 and random() < (p.multi_strike / 100.0) then
+      -- player's swing: Power vs. the enemy's (tier-scaled) Defense, with a
+      -- Crit chance to double it
       hit_dmg := greatest(1, p.attack - stats.eff_defense);
       if random() < (p.crit / 100.0) then hit_dmg := hit_dmg * 2; end if;
       cur_enemy_hp := greatest(0, cur_enemy_hp - hit_dmg);
       total_damage := total_damage + hit_dmg;
-    end if;
 
-    if cur_enemy_hp <= 0 then
-      total_kills := total_kills + 1;
-      total_xp := total_xp + stats.eff_xp;
-      total_gold := total_gold + stats.eff_gold;
-      cur_player_hp := p.max_hp; -- full heal: the next enemy starts the round fresh
+      -- Multi Strike: a chance of a second swing landing in the same round
+      if cur_enemy_hp > 0 and random() < (p.multi_strike / 100.0) then
+        hit_dmg := greatest(1, p.attack - stats.eff_defense);
+        if random() < (p.crit / 100.0) then hit_dmg := hit_dmg * 2; end if;
+        cur_enemy_hp := greatest(0, cur_enemy_hp - hit_dmg);
+        total_damage := total_damage + hit_dmg;
+      end if;
 
-      -- immediate respawn so the remaining rounds keep fighting — a fresh
-      -- tier roll each time, so a fight can run into more than one
-      -- elite/champion (or none at all)
-      cur_tier := roll_enemy_tier();
-      select * into stats from enemy_effective_stats(p_enemy_key, cur_tier);
-      cur_enemy_hp := stats.eff_max_hp;
-      cur_enemy_max_hp := stats.eff_max_hp;
-      cur_enemy_name := stats.display_name;
-    else
+      if cur_enemy_hp <= 0 then
+        -- battle resolved: the enemy died
+        total_kills := total_kills + 1;
+        total_xp := total_xp + stats.eff_xp;
+        total_gold := total_gold + stats.eff_gold;
+        cur_player_hp := p.max_hp; -- victor heals up before the next encounter
+
+        cur_tier := roll_enemy_tier();
+        select * into stats from enemy_effective_stats(p_enemy_key, cur_tier);
+        cur_enemy_hp := stats.eff_max_hp;
+        cur_enemy_max_hp := stats.eff_max_hp;
+        cur_enemy_name := stats.display_name;
+        exit exchanges; -- back to the battles loop to decide whether to start another
+      end if;
+
       -- enemy's counter-swing: its (tier-scaled) Attack vs. the player's Defense
       cur_player_hp := greatest(0, cur_player_hp - greatest(1, stats.eff_attack - p.defense));
       if cur_player_hp <= 0 then
-        cur_player_hp := p.max_hp; -- basic "knocked out, back on your feet" reset — no penalty yet
+        -- battle resolved: the player died — still no real penalty (TUNE),
+        -- but it's a tracked, reported outcome now, not a silent reset
+        total_deaths := total_deaths + 1;
+        cur_player_hp := p.max_hp;
+
+        cur_tier := roll_enemy_tier(); -- a fresh foe for the next battle
+        select * into stats from enemy_effective_stats(p_enemy_key, cur_tier);
+        cur_enemy_hp := stats.eff_max_hp;
+        cur_enemy_max_hp := stats.eff_max_hp;
+        cur_enemy_name := stats.display_name;
+        exit exchanges;
       end if;
-    end if;
-  end loop;
+    end loop exchanges;
+  end loop battles;
 
   update profiles
     set hp = cur_player_hp,
@@ -757,8 +793,8 @@ begin
     set enemy_hp = cur_enemy_hp, enemy_tier = cur_tier, updated_at = now(), last_strike_at = now()
     where profile_id = auth.uid();
 
-  return query select rounds_run, total_damage, total_kills, cur_enemy_hp, cur_enemy_max_hp, cur_enemy_name,
-    cur_player_hp, p.max_hp, total_xp, total_gold, cur_actions, false;
+  return query select rounds_run, total_damage, total_kills, total_deaths, cur_enemy_hp, cur_enemy_max_hp,
+    cur_enemy_name, cur_player_hp, p.max_hp, total_xp, total_gold, cur_actions, false;
 end;
 $$;
 

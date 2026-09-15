@@ -244,17 +244,18 @@ function renderEnemy() {
 
 // Fired automatically once per idle tick (see doTick() below) instead of
 // from a button. Costs a flat 1 action no matter what — but each call
-// resolves a whole fight in one go (rounds driven by the player's Attack
-// Speed stat, capped at 100 server-side, see strike_enemy in schema.sql)
-// rather than a single swing, rolling real crit/multi-strike/defense math
-// each round. A kill mid-fight respawns instantly into a freshly-rolled
-// tier (normal/Elite/Champion), so the enemy name/hp can change over the
-// course of one call — row.enemy_name/enemy_hp/enemy_max_hp always reflect
-// where the fight ended up. out_of_actions is only ever true when the
-// action pool was already empty before this call started (the flat cost
-// means a fight in progress is never cut short by actions running out
-// mid-way). Returns a short message for the tick log, or null if there's
-// nothing worth reporting (on cooldown, 0 rounds run).
+// resolves one or more whole BATTLES (rounds driven by the player's Attack
+// Speed stat — see strike_enemy in schema.sql), rolling real
+// crit/multi-strike/defense math each round. Every battle always runs
+// until someone dies — a kill or a player death — rather than stopping
+// partway through undecided; a kill or a death both respawn instantly into
+// a freshly-rolled tier (normal/Elite/Champion), so the enemy name/hp can
+// change over the course of one call — row.enemy_name/enemy_hp/enemy_max_hp
+// always reflect where the fight ended up. out_of_actions is only ever
+// true when the action pool was already empty before this call started
+// (the flat cost means a fight in progress is never cut short by actions
+// running out mid-way). Returns a short message for the tick log, or null
+// if there's nothing worth reporting (on cooldown, 0 rounds run).
 async function autoStrikeEnemy() {
   const { data, error } = await sb.rpc("strike_enemy", { p_enemy_key: TEST_ENEMY_KEY });
   if (error) {
@@ -277,10 +278,18 @@ async function autoStrikeEnemy() {
 
   const enemyName = row.enemy_name || "the enemy";
   const roundsText = `${row.rounds_fought} round${row.rounds_fought === 1 ? "" : "s"}`;
-  let msg;
+  const outcomes = [];
   if (row.kills > 0) {
-    const killsText = row.kills === 1 ? `slew ${enemyName}` : `slew ${enemyName} x${row.kills}`;
-    msg = `You ${killsText} over ${roundsText}! +${row.xp_gained} xp, +${row.gold_gained} gold.`;
+    outcomes.push(row.kills === 1 ? `slew ${enemyName}` : `slew ${enemyName} x${row.kills}`);
+  }
+  if (row.deaths > 0) {
+    outcomes.push(row.deaths === 1 ? "were struck down" : `were struck down x${row.deaths}`);
+  }
+
+  let msg;
+  if (outcomes.length) {
+    msg = `You ${outcomes.join(" and ")} over ${roundsText}!`;
+    if (row.xp_gained > 0 || row.gold_gained > 0) msg += ` +${row.xp_gained} xp, +${row.gold_gained} gold.`;
   } else {
     msg = `You struck ${enemyName} ${roundsText} for ${row.damage_dealt} damage.`;
   }
