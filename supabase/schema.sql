@@ -19,9 +19,8 @@ create table if not exists profiles (
   level            int not null default 1,
   xp               bigint not null default 0,
   gold             bigint not null default 0,
-  abyssal_prowess  bigint not null default 0,     -- prestige currency, earned via Banishment (see perform_banishment)
   class            text not null default 'warrior' check (class in ('warrior','archer','magi','striker')),
-  depth            int not null default 0,         -- prestige tier ("how deep")
+  depth            int not null default 0,         -- prestige tier ("how deep") == total Banishments performed; displayed to players as "Banishments"
   hp               int not null default 10,         -- current hp (solo combat)
   max_hp           int not null default 10,
   attack           int not null default 1,
@@ -65,24 +64,14 @@ alter table profiles alter column max_hp set default 10;
 -- after the first pass.
 update profiles set hp = 10, max_hp = 10 where max_hp = 100;
 
--- rename the old "shards" column to "abyssal_prowess" (same values, clearer
--- name now that it's the currency driving Banishment's retention tiers).
--- Guarded so this is a no-op both on a project that's already been renamed
--- and on a brand new project (whose CREATE TABLE above already names the
--- column abyssal_prowess directly).
-do $$
-begin
-  if exists (
-    select 1 from information_schema.columns
-    where table_schema = 'public' and table_name = 'profiles' and column_name = 'shards'
-  ) and not exists (
-    select 1 from information_schema.columns
-    where table_schema = 'public' and table_name = 'profiles' and column_name = 'abyssal_prowess'
-  ) then
-    alter table profiles rename column shards to abyssal_prowess;
-  end if;
-end $$;
-alter table profiles add column if not exists abyssal_prowess bigint not null default 0;
+-- Abyssal Prowess (formerly "shards" in an even older version) is removed:
+-- Banishment retention is now tied directly to Depth (how many times
+-- you've already banished) instead of a separate currency you had to bank
+-- up first -- see perform_banishment() further down. Drops the column on
+-- any project that still has it from before; a no-op on a fresh project
+-- (whose CREATE TABLE above never creates it in the first place).
+alter table profiles drop column if exists shards;
+alter table profiles drop column if exists abyssal_prowess;
 
 -- Combat Stats panel — Power/Defense already existed as attack/defense;
 -- these four are new. Gear-driven, so they sit at these defaults until an
@@ -1496,25 +1485,41 @@ $$;
 -- 4d. Banishment (prestige)
 --    At level 100+ a player may sacrifice their character to the Abyss:
 --    level/xp/gold reset and inventory/current-fight state are wiped, but
---    they keep Abyssal Prowess (a permanent meta-currency, +1 Depth per
---    banishment) plus a slice of their current attack/defense/max_hp,
---    sized by how much Abyssal Prowess they'd already banked BEFORE this
---    banishment. They also choose their class fresh for the new life
+--    they keep +1 Depth (displayed to players as "Banishments" -- see
+--    profiles.depth) plus a slice of their current attack/defense/max_hp,
+--    sized by how much Depth they'd already reached BEFORE this banishment
+--    (i.e. how many times they'd already banished). They also choose their
+--    class fresh for the new life
 --    (p_new_class) — same 4-option choice as initial signup, and just as
 --    consequential, since class_defs' bonus bundle (see its seed data
 --    above) applies for the whole next run. Every constant below is a
 --    first-pass number — TUNE once this is actually playtested.
+--
+--    IMPORTANT, for whenever itemization gets built (see DESIGN.md §3a):
+--    profiles.attack/defense/max_hp below MUST stay pure "character sheet"
+--    numbers — a character's own permanent growth via Banishment retention
+--    itself — and gear must NEVER mutate them, no matter how tempting it is
+--    to just "+= item bonus" onto the column. Gear stats have to apply the
+--    same way class_defs' bonuses already do: a separate modifier bundle
+--    read at combat-resolution time (see strike_enemy()'s player_mods),
+--    completely invisible to this function. Otherwise equipping strong
+--    gear right before banishing would let a player permanently bank power
+--    they never really earned on the character itself — gear is supposed
+--    to stay swappable/losable, not something Banishment can launder into
+--    permanent retention.
 -- ----------------------------------------------------------------------------
 
 create table if not exists banishments (
   id              bigint generated always as identity primary key,
   profile_id      uuid not null references profiles(id) on delete cascade,
   level_reached   int not null,
-  prowess_gained  bigint not null,
   retained_pct    numeric not null,   -- stored as a percent, e.g. 0.25, 0.5, 0.75, 100
   created_at      timestamptz not null default now()
 );
 create index if not exists idx_banishments_profile on banishments(profile_id, created_at desc);
+-- prowess_gained tracked Abyssal Prowess, which no longer exists -- dropped
+-- on any project that still has it from before; a no-op on a fresh project.
+alter table banishments drop column if exists prowess_gained;
 
 alter table banishments enable row level security;
 drop policy if exists "banishment history is publicly readable" on banishments;
@@ -1530,7 +1535,6 @@ declare
   p profiles%rowtype;
   retain_pct numeric;      -- fraction, e.g. 0.0025 for 0.25%
   display_pct numeric;     -- same tier, as the percent number shown to players
-  prowess_gain bigint;
   base_attack int := 8;    -- TUNE: matches profiles.attack's default for a fresh character
   base_defense int := 6;   -- TUNE: matches profiles.defense's default
   base_max_hp int := 30;   -- TUNE: matches profiles.max_hp's default
@@ -1553,35 +1557,36 @@ begin
     raise exception 'invalid class: %', p_new_class;
   end if;
 
-  -- retention tier is based on Abyssal Prowess already banked from PAST
-  -- banishments, not this one — the more you've banished before, the more
-  -- of this run carries into the next.
-  if p.abyssal_prowess >= 1001 then
+  -- retention tier is based on Depth already reached from PAST banishments
+  -- (profiles.depth, before this one increments it) — the more times
+  -- you've already banished, the more of this run carries into the next.
+  -- These thresholds are a straight /10 rescale of the old Abyssal-Prowess
+  -- tiers (100/501/1001), since Prowess used to be earned at a flat +10 per
+  -- banishment (floor(level/10) at the required level-100 minimum) — same
+  -- milestones and pacing as before, just read directly off Depth instead
+  -- of a separate currency you had to bank up first.
+  if p.depth >= 100 then
     retain_pct := 1.0;      display_pct := 100;
-  elsif p.abyssal_prowess >= 501 then
+  elsif p.depth >= 50 then
     retain_pct := 0.0075;   display_pct := 0.75;
-  elsif p.abyssal_prowess >= 100 then
+  elsif p.depth >= 10 then
     retain_pct := 0.005;    display_pct := 0.50;
   else
     retain_pct := 0.0025;   display_pct := 0.25;
   end if;
 
-  -- TUNE: prowess earned per banishment — simple level-based formula for now
-  prowess_gain := greatest(1, floor(p.level / 10.0));
-
   new_attack  := greatest(base_attack,  base_attack  + floor((p.attack  - base_attack)  * retain_pct));
   new_defense := greatest(base_defense, base_defense + floor((p.defense - base_defense) * retain_pct));
   new_max_hp  := greatest(base_max_hp,  base_max_hp  + floor((p.max_hp  - base_max_hp)  * retain_pct));
 
-  insert into banishments (profile_id, level_reached, prowess_gained, retained_pct)
-  values (p.id, p.level, prowess_gain, display_pct);
+  insert into banishments (profile_id, level_reached, retained_pct)
+  values (p.id, p.level, display_pct);
 
   update profiles set
     level           = 1,
     xp              = 0,
     gold            = 0,
-    depth           = depth + 1,             -- each banishment pushes you one Depth deeper
-    abyssal_prowess = abyssal_prowess + prowess_gain,
+    depth           = depth + 1,             -- each banishment pushes you one Depth ("Banishments") deeper
     class           = coalesce(p_new_class, class),
     attack          = new_attack,
     defense         = new_defense,

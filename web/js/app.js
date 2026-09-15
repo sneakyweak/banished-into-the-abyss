@@ -545,10 +545,9 @@ function renderProfile() {
     // localStorage unavailable — worst case the flash comes back, harmless
   }
 
-  $("stat-depth").textContent = p.depth;
+  $("stat-depth").textContent = p.depth; // id kept as-is internally; displayed to the player as "Banishments" (see index.html)
   $("stat-level").textContent = p.level;
   $("stat-gold").textContent = p.gold;
-  $("stat-prowess").textContent = p.abyssal_prowess;
   $("stat-actions").textContent = p.actions; // shown on the Refresh Actions button now — just the remaining count, no /max
 
   const xp = xpProgress(p.xp, p.level);
@@ -957,16 +956,17 @@ $("guild-overlay").addEventListener("click", (e) => {
 });
 
 // ---------------------------------------------------------------------------
-// Banishment (prestige) — sacrifice the character at level 100+ for
-// Abyssal Prowess plus a slice of current stats carried into the next run.
+// Banishment (prestige) — sacrifice the character at level 100+ for +1
+// Depth ("Banishments") plus a slice of current stats carried into the next
+// run, sized by how many Banishments you'd already reached before this one.
 // The retention tiers below are cosmetic display only; the real numbers are
 // computed and enforced server-side in perform_banishment() (schema.sql).
 // ---------------------------------------------------------------------------
 
-function retentionPctForProwess(prowess) {
-  if (prowess >= 1001) return 100;
-  if (prowess >= 501) return 0.75;
-  if (prowess >= 100) return 0.5;
+function retentionPctForDepth(depth) {
+  if (depth >= 100) return 100;
+  if (depth >= 50) return 0.75;
+  if (depth >= 10) return 0.5;
   return 0.25;
 }
 
@@ -988,8 +988,8 @@ function renderBanishOverlay() {
   const p = state.profile;
   if (!p) return;
   $("banish-level").textContent = p.level;
-  $("banish-prowess").textContent = p.abyssal_prowess;
-  $("banish-pct").textContent = `${retentionPctForProwess(p.abyssal_prowess)}%`;
+  $("banish-depth").textContent = p.depth;
+  $("banish-pct").textContent = `${retentionPctForDepth(p.depth)}%`;
   const eligible = p.level >= 100;
   $("btn-perform-banish").disabled = !eligible;
   $("banish-lock-note").classList.toggle("hidden", eligible);

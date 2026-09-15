@@ -160,10 +160,9 @@
           </script>
           <h2 id="char-name">—</h2>
           <ul class="stat-list">
-            <li><span class="stat-label" data-tooltip="How many times you've Banished. Each Banishment permanently adds +1 Depth and makes brackets/rewards scale up for good.">Depth</span><span id="stat-depth">0</span></li>
+            <li><span class="stat-label" data-tooltip="How many times you've Banished. Also sets how much of your attack/defense/max HP carries into your next life -- the more Banishments, the more you keep.">Banishments</span><span id="stat-depth">0</span></li>
             <li><span class="stat-label" data-tooltip="Your character's current level, driven by Experience (see the bar below). Resets to 1 every time you Banish.">Level</span><span id="stat-level">1</span></li>
             <li><span class="stat-label" data-tooltip="Everyday currency -- earned constantly from idle income and fights, spent on gear/consumables once those exist. Resets to 0 on Banishment.">Gold</span><span id="stat-gold">0</span></li>
-            <li><span class="stat-label" data-tooltip="Permanent currency, earned only by Banishing. The more you've already banked, the more of your attack/defense/max HP you keep on your NEXT Banishment.">Abyssal Prowess</span><span id="stat-prowess">0</span></li>
           </ul>
           <!-- XP progress toward next level -- mirrors perform_idle_tick()'s
                level curve in schema.sql (level = floor(sqrt(xp / 100))). -->
@@ -372,20 +371,20 @@
       <h2 class="panel-title">Banishment</h2>
       <p class="log">
         At level 100 you may sacrifice your character to the Abyss. Banishing resets your
-        character to level 1, but permanently grants Abyssal Prowess and carries a slice of
-        your current stats into your next life. The more Abyssal Prowess you've banked from
-        past banishments, the more of your run survives the next one.
+        character to level 1, but permanently grants +1 Banishment (Depth) and carries a
+        slice of your current stats into your next life. The more times you've already
+        Banished, the more of your run survives the next one.
       </p>
       <ul class="banish-tiers">
-        <li><span>Abyssal Prowess 1 – 99</span><span>0.25% retained</span></li>
-        <li><span>Abyssal Prowess 100 – 500</span><span>0.50% retained</span></li>
-        <li><span>Abyssal Prowess 501 – 1000</span><span>0.75% retained</span></li>
-        <li><span>Abyssal Prowess 1001+</span><span>100% retained</span></li>
+        <li><span>Banishments 0 – 9</span><span>0.25% retained</span></li>
+        <li><span>Banishments 10 – 49</span><span>0.50% retained</span></li>
+        <li><span>Banishments 50 – 99</span><span>0.75% retained</span></li>
+        <li><span>Banishments 100+</span><span>100% retained</span></li>
       </ul>
       <div class="panel-divider"></div>
       <ul class="stat-list">
         <li><span class="stat-label">Your Level</span><span id="banish-level">1</span></li>
-        <li><span class="stat-label">Abyssal Prowess</span><span id="banish-prowess">0</span></li>
+        <li><span class="stat-label">Your Banishments</span><span id="banish-depth">0</span></li>
         <li><span class="stat-label">Retention This Banishment</span><span id="banish-pct">0.25%</span></li>
       </ul>
       <div class="panel-divider"></div>
@@ -440,7 +439,7 @@
        brand-new visitor never sees it — only a browser that previously
        stored a different version. -->
   <script>
-    window.APP_VERSION = "19";
+    window.APP_VERSION = "20";
     window.PATCH_NOTES = [
       "Classes now have real starting bonuses instead of being purely cosmetic — Warrior (+5% HP/Defense/Power), Archer (+10% Crit/Power, -5% Defense), Magi (+10% Multi Strike/Crit, +5% Power, -20% Defense), Striker (+20% Multi Strike/Crit, -10% Defense). Shown right on the class-select screen.",
       "You now choose your class again each time you Banish, instead of being stuck with your first pick forever.",
@@ -458,6 +457,8 @@
       "New: hover over any stat keyword on the left (Depth, Power, Crit, etc.) for a tooltip explaining what it does.",
       "Number of Affixes and Player Debuffs can now be stacked all the way up to however many actually exist in the game, instead of a hardcoded 5 / 4.",
       "Number of Banishments is no longer capped a few brackets above your own Depth -- there's no ceiling at all now, and it makes the enemy pack proportionally tougher the higher you push it.",
+      "Removed Abyssal Prowess. Banishment's retention tiers (0.25% / 0.50% / 0.75% / 100%) now read directly off how many times you've Banished instead of a separate currency you had to bank up first -- same milestones and pacing as before, just one fewer number to track.",
+      "The \"Depth\" stat on the left is now labeled \"Banishments\" -- it was always just your banishment count under a different name.",
     ];
   </script>
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js"></script>
