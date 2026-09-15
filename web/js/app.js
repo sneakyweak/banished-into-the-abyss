@@ -30,6 +30,13 @@ const $ = (id) => document.getElementById(id);
 //    running the new code by the time this shows — the refresh is just a
 //    flourish, not a functional requirement — so dismissing the popup
 //    cancels the countdown instead of forcing it).
+//
+//    That initial check only fires once, at page load — a tab left open
+//    across a deploy never re-runs it, so it would never learn about a new
+//    build on its own. pollForNewVersion() (below, started at the bottom of
+//    this section) covers that case by periodically re-fetching the live
+//    index.html and comparing versions, so the popup can still show up
+//    without anyone hitting refresh first.
 // ---------------------------------------------------------------------------
 
 const SEEN_VERSION_KEY = "bita_seen_version";
@@ -91,7 +98,55 @@ function stopNewVersionCountdown() {
   if (label) label.textContent = "";
 }
 
+// checkNewVersion() above only catches a version bump at the moment the
+// page itself loads — a tab left open through a deploy is still running the
+// OLD script, with the OLD window.APP_VERSION baked in, so it can never
+// notice on its own. This periodically re-fetches the live index.html
+// (bypassing the cache) and compares the APP_VERSION baked into THAT
+// against what this tab is running; a mismatch means a new build has gone
+// out while this tab was open, so it shows the same popup (with that
+// build's real patch notes) even though nobody hit refresh.
+const VERSION_POLL_INTERVAL_MS = 60_000;
+
+function parsePatchNotes(html) {
+  const match = html.match(/window\.PATCH_NOTES\s*=\s*(\[[\s\S]*?\])\s*;/);
+  if (!match) return [];
+  try {
+    // PATCH_NOTES is written as a plain JS array literal (double-quoted
+    // strings, an allowed trailing comma) — strip the trailing comma so
+    // JSON.parse (safer than eval'ing fetched text) accepts it.
+    return JSON.parse(match[1].replace(/,(\s*\])/, "$1"));
+  } catch (e) {
+    return [];
+  }
+}
+
+async function pollForNewVersion() {
+  try {
+    const res = await fetch("/index.html", { cache: "no-store" });
+    if (!res.ok) return;
+    const html = await res.text();
+    const verMatch = html.match(/window\.APP_VERSION\s*=\s*"([^"]+)"/);
+    if (!verMatch) return;
+    const liveVersion = verMatch[1];
+    if (liveVersion === window.APP_VERSION) return; // still current, nothing to do
+
+    window.APP_VERSION = liveVersion;
+    window.PATCH_NOTES = parsePatchNotes(html);
+    try {
+      localStorage.setItem(SEEN_VERSION_KEY, liveVersion);
+    } catch (e) {
+      // localStorage unavailable — the popup still shows, it just might
+      // show again on a future load in this browser
+    }
+    showNewVersionPopup();
+  } catch (e) {
+    // offline / request hiccup — just try again next interval
+  }
+}
+
 checkNewVersion();
+setInterval(pollForNewVersion, VERSION_POLL_INTERVAL_MS);
 
 $("btn-close-new-version-overlay").addEventListener("click", () => {
   $("new-version-overlay").classList.add("hidden");

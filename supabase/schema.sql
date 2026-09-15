@@ -25,7 +25,7 @@ create table if not exists profiles (
   hp               int not null default 10,         -- current hp (solo combat)
   max_hp           int not null default 10,
   attack           int not null default 1,
-  defense          int not null default 5,
+  defense          int not null default 1,
   actions          int not null default 3000,       -- spendable action points
   max_actions      int not null default 3000,
   last_tick_at     timestamptz not null default now(),
@@ -92,26 +92,28 @@ alter table profiles add column if not exists crit numeric not null default 0;
 alter table profiles add column if not exists multi_strike numeric not null default 0;
 alter table profiles add column if not exists speed int not null default 1;
 
--- base stat rebalance: Power (attack) 10 -> 1, Crit 5% -> 0%, Speed 10 -> 1
--- (a deliberate difficulty change). Same "add column if not exists is a
--- no-op on an already-deployed table" trap as hp above — the column
--- defaults above only take effect for a table created fresh by this file,
--- so the actual default has to be changed explicitly for a project that's
--- already deployed.
+-- base stat rebalance: Power (attack) 10 -> 1, Crit 5% -> 0%, Speed 10 -> 1,
+-- Defense 5 -> 1 (a deliberate difficulty change). Same "add column if not
+-- exists is a no-op on an already-deployed table" trap as hp above — the
+-- column defaults above only take effect for a table created fresh by this
+-- file, so the actual default has to be changed explicitly for a project
+-- that's already deployed.
 alter table profiles alter column attack set default 1;
 alter table profiles alter column crit set default 0;
 alter table profiles alter column speed set default 1;
+alter table profiles alter column defense set default 1;
 
 -- retroactively apply the new baseline to any EXISTING character still at
--- the old untouched defaults. Guarded per-column (not all three at once)
--- so a character that's, say, banished and picked up bonus attack but
+-- the old untouched defaults. Guarded per-column (not all four at once) so
+-- a character that's, say, banished and picked up bonus attack/defense but
 -- never touched crit/speed still gets those two reset. Never touches a
--- stat that's already moved off its old default (e.g. attack raised via
--- Banishment retention); safe to re-run since those rows no longer match
--- after the first pass.
+-- stat that's already moved off its old default (e.g. attack/defense
+-- raised via Banishment retention); safe to re-run since those rows no
+-- longer match after the first pass.
 update profiles set attack = 1 where attack = 10;
 update profiles set crit = 0 where crit = 5;
 update profiles set speed = 1 where speed = 10;
+update profiles set defense = 1 where defense = 5;
 
 create table if not exists guilds (
   id          uuid primary key default gen_random_uuid(),
@@ -908,7 +910,7 @@ declare
   display_pct numeric;     -- same tier, as the percent number shown to players
   prowess_gain bigint;
   base_attack int := 1;    -- TUNE: matches profiles.attack's default for a fresh character
-  base_defense int := 5;   -- TUNE: matches profiles.defense's default
+  base_defense int := 1;   -- TUNE: matches profiles.defense's default
   base_max_hp int := 10;   -- TUNE: matches profiles.max_hp's default
   new_attack int;
   new_defense int;

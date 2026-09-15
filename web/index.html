@@ -76,10 +76,8 @@
   <main id="game-screen" class="hidden">
 
     <nav class="page-nav">
-      <span class="page-pill active">World</span>
       <button type="button" id="nav-guild-btn" class="page-pill active">Guild</button>
       <button type="button" id="nav-banish-btn" class="page-pill active">Banish</button>
-      <span class="page-pill active">Character</span>
       <span class="page-pill soon">Party<i>soon</i></span>
       <span class="page-pill soon">Trade<i>soon</i></span>
       <span class="page-nav-note">more pages arrive here as they're built</span>
@@ -296,10 +294,11 @@
        brand-new visitor never sees it — only a browser that previously
        stored a different version. -->
   <script>
-    window.APP_VERSION = "4";
+    window.APP_VERSION = "5";
     window.PATCH_NOTES = [
-      "Added a live combat log — see exactly who hit whom, for how much, and whether it was a crit or multi strike.",
-      "Actions counter moved off the sidebar and onto the Refresh Actions button.",
+      "This update notice now appears on its own, even if you already had the game open.",
+      "Defense now starts at 1.",
+      "Removed the World and Character nav pills.",
     ];
   </script>
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js"></script>
