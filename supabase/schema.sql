@@ -1747,14 +1747,18 @@ begin
       round_hits := round_hits || counter_hits;
 
       if cur_player_hp <= 0 then
-        -- Death penalty (see the player-first death branch below for the
-        -- full rationale): 25% of current gold, 10% of current xp, off
-        -- p.gold/p.xp as they stood when this call started — a death tick
-        -- never also earns a kill's reward in the same call (see the
+        -- Death penalty: currently 0% of both gold and xp -- TUNE, set to
+        -- 0 deliberately (see the player-first death branch below for the
+        -- full history/rationale of what this used to be). Kept as real
+        -- variables computed the same way rather than deleting the
+        -- mechanism, so re-tuning this back up later is a one-line change,
+        -- not rebuilding death handling from scratch. off p.gold/p.xp as
+        -- they stood when this call started — a death tick never also
+        -- earns a kill's reward in the same call (see the
         -- single-event-per-tick banner comment above), so those are still
         -- the player's true current totals at the moment they died.
-        penalty_gold := floor(p.gold * 0.25);
-        penalty_xp := floor(p.xp * 0.10);
+        penalty_gold := floor(p.gold * 0.0);
+        penalty_xp := floor(p.xp * 0.0);
         total_gold_lost := total_gold_lost + penalty_gold;
         total_xp_lost := total_xp_lost + penalty_xp;
 
@@ -1886,20 +1890,25 @@ begin
         -- here, only on a clear above. Still a tracked, reported outcome,
         -- not a silent reset. Full heal (to this fight's effective cap)
         -- and a fresh pack, same selections/affixes/debuffs. DEATH PENALTY:
-        -- 25% of current gold, 10% of current xp — enough to make pushing
-        -- pack size/affixes/debuffs past a comfortable margin a real risk,
-        -- not just a free way to farm harder content until it works
-        -- (Banishment difficulty scales automatically now, not something
-        -- pushed). Off p.gold/p.xp as they stood when this call started (a
-        -- death tick never also earns a kill's reward in the same call —
-        -- see the single-event-per-tick banner comment above — so those are
-        -- still the player's true current totals at the moment they died).
+        -- 0% of current gold, 0% of current xp -- TUNE, set to 0
+        -- deliberately (this used to be 25%/10%, back when it was the
+        -- counterweight making pushing pack size/affixes/debuffs past a
+        -- comfortable margin a real risk instead of a free way to farm
+        -- harder content until it works; Banishment difficulty scaling
+        -- automatically now covers that same "don't overreach for free"
+        -- role on its own, so dying no longer costs anything on top of it —
+        -- see the mirrored branch above for the same change). Off
+        -- p.gold/p.xp as they stood when this call started (a death tick
+        -- never also earns a kill's reward in the same call — see the
+        -- single-event-per-tick banner comment above — so those are still
+        -- the player's true current totals at the moment they died, for
+        -- whenever this gets tuned back up).
         -- Then STOP — same reasoning as the pack-cleared branch above:
         -- this tick's fight is over the instant the player dies, not a
         -- chance for the leftover budget to kill them again against the
         -- freshly-rolled pack.
-        penalty_gold := floor(p.gold * 0.25);
-        penalty_xp := floor(p.xp * 0.10);
+        penalty_gold := floor(p.gold * 0.0);
+        penalty_xp := floor(p.xp * 0.0);
         total_gold_lost := total_gold_lost + penalty_gold;
         total_xp_lost := total_xp_lost + penalty_xp;
 
