@@ -73,8 +73,43 @@
       </div>
       <p id="auth-error" class="error"></p>
       <p class="log">No email needed — just pick a character name and password.</p>
+      <button type="button" id="btn-forgot-password" class="btn-link">Forgot password?</button>
+
+      <!-- Security question is set once, only at signup (used below by
+           Sign Up) — ignored on Sign In. Both fields are optional: skip
+           them and there's simply no self-service recovery available for
+           that character later, same as leaving it unset today. -->
+      <div class="panel-divider"></div>
+      <p class="log">Optional — set a security question now so you can reset your password later without an email on file:</p>
+      <input id="auth-security-question" type="text" maxlength="200" placeholder="security question (optional)" autocomplete="off" />
+      <input id="auth-security-answer" type="text" maxlength="200" placeholder="answer (optional)" autocomplete="off" />
     </div>
   </section>
+
+  <!-- ============ FORGOT PASSWORD OVERLAY ============ -->
+  <div id="forgot-password-overlay" class="overlay hidden">
+    <div class="panel overlay-panel">
+      <button type="button" id="btn-close-forgot-overlay" class="overlay-close" aria-label="Close">&times;</button>
+      <h2 class="panel-title">Reset Password</h2>
+
+      <div id="forgot-step-username">
+        <p class="log">Enter your character name to look up its security question.</p>
+        <input id="forgot-username" type="text" placeholder="character name" autocomplete="username" />
+        <button id="btn-forgot-lookup">Find My Question</button>
+      </div>
+
+      <div id="forgot-step-answer" class="hidden">
+        <p class="log"><strong id="forgot-question-text"></strong></p>
+        <input id="forgot-answer" type="text" placeholder="your answer" autocomplete="off" />
+        <input id="forgot-new-password" type="password" placeholder="new password" autocomplete="new-password" />
+        <input id="forgot-new-password2" type="password" placeholder="confirm new password" autocomplete="new-password" />
+        <button id="btn-forgot-reset">Reset Password</button>
+      </div>
+
+      <p id="forgot-error" class="error"></p>
+      <p id="forgot-success" class="log hidden"></p>
+    </div>
+  </div>
 
   <!-- ============ GAME SCREEN ============ -->
   <main id="game-screen" class="hidden">
@@ -375,10 +410,11 @@
        brand-new visitor never sees it — only a browser that previously
        stored a different version. -->
   <script>
-    window.APP_VERSION = "12";
+    window.APP_VERSION = "13";
     window.PATCH_NOTES = [
       "Classes now have real starting bonuses instead of being purely cosmetic — Warrior (+5% HP/Defense/Power), Archer (+10% Crit/Power, -5% Defense), Magi (+10% Multi Strike/Crit, +5% Power, -20% Defense), Striker (+20% Multi Strike/Crit, -10% Defense). Shown right on the class-select screen.",
       "You now choose your class again each time you Banish, instead of being stuck with your first pick forever.",
+      "New: an optional security question, set at signup, lets you reset your own password later — there's a 'Forgot password?' link on the sign-in screen. No email address is ever needed.",
     ];
   </script>
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js"></script>

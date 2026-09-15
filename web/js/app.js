@@ -285,10 +285,21 @@ $("btn-signup").addEventListener("click", async () => {
   if (!state.selectedClass) {
     return showAuthError("Choose a class above before signing up.");
   }
+  // Security question/answer are both optional, but only meaningful as a
+  // pair — sent along only when the player filled in both (handle_new_user
+  // in schema.sql does the same "both or neither" check server-side, so
+  // this is just to avoid a confusing half-set state client-side too).
+  const secQuestion = $("auth-security-question").value.trim();
+  const secAnswer = $("auth-security-answer").value.trim();
+  const signupData = { username, class: state.selectedClass };
+  if (secQuestion && secAnswer) {
+    signupData.security_question = secQuestion;
+    signupData.security_answer = secAnswer;
+  }
   const { error } = await sb.auth.signUp({
     email: usernameToFakeEmail(username),
     password,
-    options: { data: { username, class: state.selectedClass } },
+    options: { data: signupData },
   });
   if (error) {
     // Supabase's generic "already registered" message talks about email —
@@ -314,6 +325,78 @@ $("btn-signin").addEventListener("click", async () => {
 
 $("btn-signout").addEventListener("click", async () => {
   await sb.auth.signOut();
+});
+
+// ---------------------------------------------------------------------------
+// Forgot password — self-service reset via the optional security question
+// set at signup. No email on file (see usernameToFakeEmail above), so this
+// is the only recovery path a player has; get_security_question() and
+// reset_password_with_security_answer() (schema.sql) are both callable
+// while signed out. Two-step overlay: look up the question by username,
+// then answer it + pick a new password.
+// ---------------------------------------------------------------------------
+
+function resetForgotOverlay() {
+  $("forgot-step-username").classList.remove("hidden");
+  $("forgot-step-answer").classList.add("hidden");
+  $("forgot-username").value = "";
+  $("forgot-answer").value = "";
+  $("forgot-new-password").value = "";
+  $("forgot-new-password2").value = "";
+  $("forgot-error").textContent = "";
+  $("forgot-success").textContent = "";
+  $("forgot-success").classList.add("hidden");
+}
+
+$("btn-forgot-password").addEventListener("click", () => {
+  resetForgotOverlay();
+  $("forgot-password-overlay").classList.remove("hidden");
+});
+$("btn-close-forgot-overlay").addEventListener("click", () => {
+  $("forgot-password-overlay").classList.add("hidden");
+});
+$("forgot-password-overlay").addEventListener("click", (e) => {
+  if (e.target.id === "forgot-password-overlay") $("forgot-password-overlay").classList.add("hidden");
+});
+
+$("btn-forgot-lookup").addEventListener("click", async () => {
+  const username = $("forgot-username").value.trim();
+  $("forgot-error").textContent = "";
+  if (!username) return ($("forgot-error").textContent = "Enter your character name.");
+
+  const { data, error } = await sb.rpc("get_security_question", { p_username: username });
+  if (error) return ($("forgot-error").textContent = error.message);
+  if (!data) {
+    return ($("forgot-error").textContent =
+      "No security question is set for that character — recovery isn't available for it.");
+  }
+  $("forgot-question-text").textContent = data;
+  $("forgot-step-username").classList.add("hidden");
+  $("forgot-step-answer").classList.remove("hidden");
+});
+
+$("btn-forgot-reset").addEventListener("click", async () => {
+  const username = $("forgot-username").value.trim();
+  const answer = $("forgot-answer").value;
+  const newPassword = $("forgot-new-password").value;
+  const newPassword2 = $("forgot-new-password2").value;
+  $("forgot-error").textContent = "";
+
+  if (!answer) return ($("forgot-error").textContent = "Enter your answer.");
+  if (newPassword.length < 6) return ($("forgot-error").textContent = "New password must be at least 6 characters.");
+  if (newPassword !== newPassword2) return ($("forgot-error").textContent = "Passwords don't match.");
+
+  const { data, error } = await sb.rpc("reset_password_with_security_answer", {
+    p_username: username,
+    p_answer: answer,
+    p_new_password: newPassword,
+  });
+  if (error) return ($("forgot-error").textContent = error.message);
+  if (!data) return ($("forgot-error").textContent = "Incorrect answer.");
+
+  $("forgot-step-answer").classList.add("hidden");
+  $("forgot-success").textContent = "Password updated — you can sign in with your new password now.";
+  $("forgot-success").classList.remove("hidden");
 });
 
 function showAuthError(msg) {

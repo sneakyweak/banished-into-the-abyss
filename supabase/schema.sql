@@ -460,6 +460,39 @@ create policy "transfers are readable by sender or recipient" on item_transfers
   for select using (sender_id = auth.uid() or recipient_id = auth.uid());
 
 -- ----------------------------------------------------------------------------
+-- 2a. Password recovery (security question) storage
+--    Players never give an email (see §3 below), so Supabase's normal
+--    "email a reset link" flow is unusable here — this is the only
+--    self-service password recovery this game has. Deliberately its own
+--    table, NOT columns on profiles: profiles has a public-read RLS policy
+--    ("profiles are publicly readable" above), and RLS can't restrict
+--    individual columns — a security-answer hash living on profiles would
+--    be readable by anyone, hash and all, which defeats the point. This
+--    table instead has RLS enabled with ZERO policies, so nothing (not
+--    even a logged-in player reading their own row) can select, insert, or
+--    update it directly — the only access is through the two
+--    SECURITY DEFINER functions below, which run as the table owner and
+--    bypass RLS entirely. The explicit revoke below is belt-and-suspenders
+--    on top of that, undoing Supabase's own default privilege grants (new
+--    tables are auto-granted select/insert/update/delete for anon and
+--    authenticated unless revoked) so this table has no path in at all
+--    except through those two functions.
+-- ----------------------------------------------------------------------------
+
+create table if not exists account_recovery (
+  profile_id       uuid primary key references profiles(id) on delete cascade,
+  question         text not null check (char_length(question) between 1 and 200),
+  answer_hash      text not null,
+  failed_attempts  int not null default 0,
+  locked_until     timestamptz,
+  updated_at       timestamptz not null default now()
+);
+
+alter table account_recovery enable row level security;
+-- (no policies on purpose — see comment above)
+revoke all on account_recovery from anon, authenticated;
+
+-- ----------------------------------------------------------------------------
 -- 3. New-user signup -> profile row
 --    Client passes the chosen username in auth signUp's options.data.username.
 --    Players never enter an email: the client (web/js/app.js) derives one
@@ -467,6 +500,13 @@ create policy "transfers are readable by sender or recipient" on item_transfers
 --    email/password auth can be used under the hood. This REQUIRES turning
 --    off "Confirm email" in Authentication -> Settings, since no
 --    confirmation link could ever reach a .invalid address.
+--
+--    The client can also optionally send security_question/security_answer
+--    in the same options.data payload (both or neither — see
+--    web/js/app.js's signup handler). When present, the answer is hashed
+--    with pgcrypto's bcrypt (crypt()/gen_salt('bf')) before it's ever
+--    written anywhere — see §2a above for why the raw pair never touches
+--    profiles.
 -- ----------------------------------------------------------------------------
 
 create or replace function handle_new_user()
@@ -477,6 +517,8 @@ set search_path = public
 as $$
 declare
   chosen_class text;
+  sec_question text;
+  sec_answer text;
 begin
   chosen_class := new.raw_user_meta_data->>'class';
   if chosen_class is null or chosen_class not in ('warrior','archer','magi','striker') then
@@ -489,6 +531,14 @@ begin
     coalesce(new.raw_user_meta_data->>'username', 'wanderer_' || substr(new.id::text, 1, 8)),
     chosen_class
   );
+
+  sec_question := nullif(trim(new.raw_user_meta_data->>'security_question'), '');
+  sec_answer := nullif(trim(new.raw_user_meta_data->>'security_answer'), '');
+  if sec_question is not null and sec_answer is not null then
+    insert into public.account_recovery (profile_id, question, answer_hash)
+    values (new.id, sec_question, crypt(lower(sec_answer), gen_salt('bf')));
+  end if;
+
   return new;
 end;
 $$;
@@ -497,6 +547,121 @@ drop trigger if exists on_auth_user_created on auth.users;
 create trigger on_auth_user_created
   after insert on auth.users
   for each row execute function handle_new_user();
+
+-- ----------------------------------------------------------------------------
+-- 3a. Password recovery RPCs
+--    Both are called while SIGNED OUT (no auth.uid()), so both take the
+--    username explicitly rather than relying on the session — that's what
+--    makes this "recovery" rather than a normal authenticated settings
+--    change. Answers are matched case-insensitively (lower()'d on both
+--    write and read) so "Blue"/"blue"/"BLUE" all work, same spirit as
+--    username's case-insensitive uniqueness elsewhere in this file.
+--
+--    Brute-force guard: 5 wrong answers locks that character's recovery
+--    for 15 minutes (both TUNE). This only ever throttles guessing the
+--    ANSWER for an account that already has a question set — it's not a
+--    login rate limit and doesn't touch auth.users, so it can't be used to
+--    lock a player out of signing in normally.
+--
+--    Both functions return/raise the same generic wording regardless of
+--    *why* they failed (no such username, no question set, wrong answer)
+--    so a failed attempt can't be used to probe which usernames exist or
+--    which have recovery configured.
+-- ----------------------------------------------------------------------------
+
+create or replace function get_security_question(p_username text)
+returns text
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  result text;
+begin
+  select ar.question into result
+  from account_recovery ar
+  join profiles p on p.id = ar.profile_id
+  where lower(p.username) = lower(p_username);
+  return result; -- null if no such username, or that username has no question set
+end;
+$$;
+
+create or replace function reset_password_with_security_answer(
+  p_username text, p_answer text, p_new_password text
+)
+returns boolean
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  target_id uuid;
+  rec account_recovery%rowtype;
+  max_attempts int := 5;      -- TUNE
+  lockout interval := interval '15 minutes'; -- TUNE
+  generic_error text := 'incorrect character name or answer';
+begin
+  if p_new_password is null or char_length(p_new_password) < 6 then
+    raise exception 'new password must be at least 6 characters';
+  end if;
+
+  select p.id into target_id from profiles p where lower(p.username) = lower(p_username);
+  if target_id is null then
+    raise exception '%', generic_error;
+  end if;
+
+  select * into rec from account_recovery where profile_id = target_id for update;
+  if not found then
+    raise exception '%', generic_error;
+  end if;
+
+  if rec.locked_until is not null and rec.locked_until > now() then
+    raise exception 'too many attempts — try again after %', to_char(rec.locked_until, 'HH12:MI AM');
+  end if;
+
+  if rec.answer_hash <> crypt(lower(trim(p_answer)), rec.answer_hash) then
+    -- RETURN false here rather than raise an exception: an exception
+    -- unwinds to the caller's savepoint and would silently roll back the
+    -- failed_attempts bump below along with it (Postgres undoes
+    -- everything since the savepoint, not just the statement that
+    -- raised) — so the lockout counter would never actually persist.
+    -- Returning false instead lets this UPDATE commit as part of the
+    -- function's normal (non-erroring) completion. The client already
+    -- treats a false return as "incorrect answer" (see web/js/app.js),
+    -- so the player sees the same generic message either way.
+    update account_recovery
+      set failed_attempts = failed_attempts + 1,
+          locked_until = case when failed_attempts + 1 >= max_attempts then now() + lockout else locked_until end,
+          updated_at = now()
+      where profile_id = target_id;
+    return false;
+  end if;
+
+  -- correct answer: set the new password directly on auth.users the same
+  -- way Supabase Auth (GoTrue) itself does — encrypted_password is a plain
+  -- bcrypt hash, and pgcrypto's crypt()/gen_salt('bf') produces the exact
+  -- same format. This function runs as the table owner (security definer),
+  -- which is what makes writing to the auth schema possible at all here.
+  update auth.users
+    set encrypted_password = crypt(p_new_password, gen_salt('bf')),
+        updated_at = now()
+    where id = target_id;
+
+  update account_recovery
+    set failed_attempts = 0, locked_until = null, updated_at = now()
+    where profile_id = target_id;
+
+  -- force re-login everywhere: a stolen/guessed answer shouldn't just get
+  -- a new password while leaving the real owner's (or an attacker's)
+  -- existing sessions alive. Guarded on the table existing since the local
+  -- test rig's auth stub doesn't have it — real Supabase always does.
+  if to_regclass('auth.sessions') is not null then
+    delete from auth.sessions where user_id = target_id;
+  end if;
+
+  return true;
+end;
+$$;
 
 -- ----------------------------------------------------------------------------
 -- 4. Idle tick resolution

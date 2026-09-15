@@ -262,6 +262,16 @@ button:hover { opacity: 0.85; }
 button:disabled { opacity: 0.4; cursor: not-allowed; }
 .btn-ghost { background: transparent; border: 1px solid var(--border); color: var(--dim); }
 .btn-ghost:hover { border-color: var(--accent); color: var(--text); opacity: 1; }
+.btn-link {
+  background: transparent;
+  border: none;
+  color: var(--dim);
+  padding: 2px 0;
+  font-size: 0.8rem;
+  text-decoration: underline;
+  align-self: center;
+}
+.btn-link:hover { color: var(--accent-bright); opacity: 1; }
 
 .error { color: var(--danger); min-height: 1.2em; font-size: 0.85rem; }
 .log { color: var(--dim); font-size: 0.85rem; min-height: 1.2em; }
@@ -335,6 +345,18 @@ button:disabled { opacity: 0.4; cursor: not-allowed; }
   max-height: 85vh;
   overflow-y: auto;
   margin: 0;
+}
+.overlay-panel input {
+  display: block;
+  width: 100%;
+  background: #0c0a10;
+  border: 1px solid var(--border);
+  color: var(--text);
+  padding: 8px;
+  border-radius: 4px;
+  font-family: inherit;
+  margin: 6px 0;
+  box-sizing: border-box;
 }
 .overlay-close {
   position: absolute;
