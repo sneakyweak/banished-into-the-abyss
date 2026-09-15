@@ -123,7 +123,18 @@ function parsePatchNotes(html) {
 
 async function pollForNewVersion() {
   try {
-    const res = await fetch("/index.html", { cache: "no-store" });
+    // { cache: "no-store" } only bypasses THIS BROWSER's own HTTP cache —
+    // it does nothing about Cloudflare's edge cache sitting in front of the
+    // Worker, which can happily keep serving a stale index.html from cache
+    // for a while after a deploy even on a "no-store" request. A refresh
+    // still worked because enough time had usually passed for that edge
+    // cache to expire by then. A cache-busting query string sidesteps this
+    // entirely — it's a URL Cloudflare (and the browser) has never cached,
+    // so this always reaches the real, current file.
+    const res = await fetch(`/index.html?_=${Date.now()}`, {
+      cache: "no-store",
+      headers: { "Cache-Control": "no-cache", Pragma: "no-cache" },
+    });
     if (!res.ok) return;
     const html = await res.text();
     const verMatch = html.match(/window\.APP_VERSION\s*=\s*"([^"]+)"/);
