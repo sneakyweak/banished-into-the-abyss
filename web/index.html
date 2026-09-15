@@ -85,25 +85,35 @@
       <span class="page-nav-note">more pages arrive here as they're built</span>
     </nav>
 
-    <aside class="panel sidebar">
-      <div class="avatar-box">
-        <img id="avatar-portrait" class="avatar-portrait" src="img/class-warrior-avatar.jpg" alt="" />
-      </div>
-      <h2 id="char-name">—</h2>
-      <ul class="stat-list">
-        <li><span class="stat-label">Depth</span><span id="stat-depth">0</span></li>
-        <li><span class="stat-label">Level</span><span id="stat-level">1</span></li>
-        <li><span class="stat-label">Experience</span><span id="stat-xp">0</span></li>
-        <li><span class="stat-label">Gold</span><span id="stat-gold">0</span></li>
-        <li><span class="stat-label">Abyssal Prowess</span><span id="stat-prowess">0</span></li>
-        <li><span class="stat-label">Attack</span><span id="stat-attack">0</span></li>
-        <li><span class="stat-label">Actions</span><span><span id="stat-actions">0</span>/<span id="stat-max-actions">0</span></span></li>
-      </ul>
+    <div class="sidebar">
+      <aside class="panel">
+        <div class="avatar-box">
+          <img id="avatar-portrait" class="avatar-portrait" src="img/class-warrior-avatar.jpg" alt="" />
+        </div>
+        <h2 id="char-name">—</h2>
+        <ul class="stat-list">
+          <li><span class="stat-label">Depth</span><span id="stat-depth">0</span></li>
+          <li><span class="stat-label">Level</span><span id="stat-level">1</span></li>
+          <li><span class="stat-label">Experience</span><span id="stat-xp">0</span></li>
+          <li><span class="stat-label">Gold</span><span id="stat-gold">0</span></li>
+          <li><span class="stat-label">Abyssal Prowess</span><span id="stat-prowess">0</span></li>
+          <li><span class="stat-label">Actions</span><span><span id="stat-actions">0</span>/<span id="stat-max-actions">0</span></span></li>
+        </ul>
+      </aside>
 
-      <div class="sidebar-buttons">
-        <button id="btn-refresh-actions">Refresh Actions</button>
-      </div>
-    </aside>
+      <aside class="panel">
+        <h2 class="panel-title">Combat Stats</h2>
+        <ul class="stat-list">
+          <li><span class="stat-label">Power</span><span id="stat-power">0</span></li>
+          <li><span class="stat-label">Defense</span><span id="stat-defense">0</span></li>
+          <li><span class="stat-label">Attack Speed</span><span id="stat-attack-speed">0</span></li>
+          <li><span class="stat-label">Crit</span><span id="stat-crit">0%</span></li>
+          <li><span class="stat-label">Multi Strike</span><span id="stat-multi-strike">0%</span></li>
+          <li><span class="stat-label">Speed</span><span id="stat-speed">0</span></li>
+        </ul>
+        <p class="log">Gear-driven — these hold at base until items/relics exist.</p>
+      </aside>
+    </div>
 
     <section class="panel battle-panel">
       <h2 class="panel-title">Current Battle</h2>
@@ -126,6 +136,7 @@
       </div>
 
       <div class="tick-bar"><div id="tick-bar-fill" class="tick-fill"></div></div>
+      <button id="btn-refresh-actions">Refresh Actions</button>
       <p id="tick-log" class="log"></p>
     </section>
 
@@ -175,23 +186,23 @@
       <button type="button" id="btn-close-guild-overlay" class="overlay-close" aria-label="Close">&times;</button>
       <h2 class="panel-title">Guild</h2>
 
-      <h3 class="panel-subtitle">Guild Boss</h3>
-      <div id="boss-status">
-        <div id="boss-name" class="boss-name">—</div>
-        <div class="hp-bar"><div id="boss-hp-fill" class="hp-fill"></div></div>
-        <div id="boss-hp-text"></div>
-        <p class="log">Fed automatically by your idle progress — no manual strike needed.</p>
-      </div>
-
-      <div class="panel-divider"></div>
-
       <div id="no-guild">
         <input id="guild-name" type="text" placeholder="new guild name" />
         <input id="guild-tag" type="text" placeholder="TAG (2-5 chars)" />
         <button id="btn-create-guild">Found Guild</button>
-        <hr />
+
+        <div class="panel-divider"></div>
+        <h3 class="panel-subtitle">Guilds</h3>
         <div id="guild-list"></div>
-        <button id="btn-refresh-guilds">Refresh guild list</button>
+        <button id="btn-refresh-guilds" class="btn-ghost">Refresh guild list</button>
+
+        <div class="panel-divider"></div>
+        <h3 class="panel-subtitle">Your Invites</h3>
+        <ul id="my-invites-list" class="request-list"><li class="log">None.</li></ul>
+
+        <div class="panel-divider"></div>
+        <h3 class="panel-subtitle">Your Applications</h3>
+        <ul id="my-applications-list" class="request-list"><li class="log">None.</li></ul>
       </div>
       <div id="in-guild" class="hidden">
         <div class="guild-heading-row">
@@ -200,6 +211,20 @@
         </div>
         <p class="log">Members</p>
         <ul id="member-list"></ul>
+
+        <div id="guild-recruitment" class="hidden">
+          <div class="panel-divider"></div>
+          <h3 class="panel-subtitle">Recruitment</h3>
+          <div class="invite-form">
+            <input id="invite-username" type="text" placeholder="character name to invite" />
+            <button id="btn-send-invite">Send Invite</button>
+          </div>
+          <p id="invite-error" class="error"></p>
+          <p class="log">Pending Applications</p>
+          <ul id="pending-applications-list" class="request-list"><li class="log">None.</li></ul>
+          <p class="log">Pending Invites Sent</p>
+          <ul id="pending-invites-list" class="request-list"><li class="log">None.</li></ul>
+        </div>
 
         <div id="guild-settings" class="hidden">
           <div class="panel-divider"></div>

@@ -389,6 +389,21 @@ button:disabled { opacity: 0.4; cursor: not-allowed; }
 .btn-danger { background: var(--danger); }
 .btn-danger:hover { opacity: 0.85; }
 
+.request-list { list-style: none; margin: 8px 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.request-list li {
+  display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  font-size: 0.85rem; border-bottom: 1px dotted var(--border); padding-bottom: 6px;
+}
+.request-list li > span:first-child { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.request-list li > span:last-child { display: flex; gap: 6px; flex: 0 0 auto; }
+.request-list li button { font-size: 0.75rem; padding: 5px 8px; }
+
+.invite-form { display: flex; gap: 8px; margin: 10px 0; }
+.invite-form input {
+  flex: 1; background: #0c0a10; border: 1px solid var(--border); color: var(--text);
+  padding: 8px; border-radius: 4px; font-family: inherit;
+}
+
 /* ---------------------------------------------------------------------- */
 /* Game layout                                                             */
 /* ---------------------------------------------------------------------- */
@@ -403,7 +418,7 @@ button:disabled { opacity: 0.4; cursor: not-allowed; }
   align-items: start;
   gap: 0;
 }
-.sidebar { grid-area: sidebar; }
+.sidebar { grid-area: sidebar; display: flex; flex-direction: column; }
 .battle-panel { grid-area: battle; margin-bottom: 0; }
 .chat-panel { grid-area: chat; margin-top: 0; }
 .equipment-panel { grid-area: equipment; }
@@ -436,8 +451,6 @@ button:disabled { opacity: 0.4; cursor: not-allowed; }
 .stat-list li { display: flex; justify-content: space-between; font-size: 0.85rem; border-bottom: 1px dotted var(--border); padding-bottom: 4px; }
 .stat-label { color: var(--dim); }
 .stat-list span:last-child { color: var(--accent-bright); font-weight: bold; }
-
-.sidebar-buttons { display: flex; flex-direction: column; gap: 8px; margin-top: 14px; }
 
 /* Battle panel */
 
@@ -488,8 +501,6 @@ button:disabled { opacity: 0.4; cursor: not-allowed; }
 .hp-bar { background: #2a1f36; border-radius: 4px; height: 16px; overflow: hidden; margin: 8px 0 4px; }
 .hp-fill { background: linear-gradient(90deg, var(--danger), #ff8a5b); height: 100%; width: 100%; transition: width 0.3s; }
 .hp-fill-player { background: linear-gradient(90deg, var(--good), #7fe0a0); }
-#boss-hp-text { font-size: 0.8rem; color: var(--dim); margin-bottom: 8px; }
-.boss-name { font-weight: bold; margin-bottom: 6px; }
 
 .battle-panel { text-align: center; }
 .battle-panel .panel-title { text-align: left; }

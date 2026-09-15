@@ -66,6 +66,14 @@ begin
 end $$;
 alter table profiles add column if not exists abyssal_prowess bigint not null default 0;
 
+-- Combat Stats panel — Power/Defense already existed as attack/defense;
+-- these four are new. Gear-driven, so they sit at these defaults until an
+-- items/relics system that grants them exists.
+alter table profiles add column if not exists attack_speed numeric not null default 1.0;
+alter table profiles add column if not exists crit numeric not null default 5;
+alter table profiles add column if not exists multi_strike numeric not null default 0;
+alter table profiles add column if not exists speed int not null default 10;
+
 create table if not exists guilds (
   id          uuid primary key default gen_random_uuid(),
   name        text not null unique check (char_length(name) between 3 and 30),
@@ -83,6 +91,27 @@ create table if not exists guild_members (
   primary key (guild_id, profile_id)
 );
 create index if not exists idx_guild_members_guild on guild_members(guild_id);
+
+-- Guild applications (player -> guild) and invites (guild -> player) share
+-- this one table, distinguished by "type". A player can have at most one
+-- pending request of a given type against a given guild at a time (see the
+-- partial unique index below) — this does NOT stop a player from having
+-- pending requests against several different guilds simultaneously, or an
+-- application and an invite to the same guild at once (respond_to_* just
+-- resolves whichever fires first and the request functions decline to
+-- create a duplicate on top of an existing pending one).
+create table if not exists guild_requests (
+  id          uuid primary key default gen_random_uuid(),
+  guild_id    uuid not null references guilds(id) on delete cascade,
+  profile_id  uuid not null references profiles(id) on delete cascade,
+  type        text not null check (type in ('application','invite')),
+  status      text not null default 'pending' check (status in ('pending','accepted','declined','cancelled')),
+  created_at  timestamptz not null default now()
+);
+create index if not exists idx_guild_requests_guild on guild_requests(guild_id, status);
+create index if not exists idx_guild_requests_profile on guild_requests(profile_id, status);
+create unique index if not exists idx_guild_requests_pending_unique
+  on guild_requests (guild_id, profile_id, type) where status = 'pending';
 
 create table if not exists guild_bosses (
   id             uuid primary key default gen_random_uuid(),
@@ -215,6 +244,7 @@ alter table guilds enable row level security;
 alter table guild_members enable row level security;
 alter table guild_bosses enable row level security;
 alter table guild_boss_damage_log enable row level security;
+alter table guild_requests enable row level security;
 alter table items enable row level security;
 alter table inventory enable row level security;
 alter table enemies enable row level security;
@@ -241,6 +271,22 @@ create policy "guild bosses are publicly readable" on guild_bosses for select us
 
 drop policy if exists "boss damage log is publicly readable" on guild_boss_damage_log;
 create policy "boss damage log is publicly readable" on guild_boss_damage_log for select using (true);
+
+-- guild_requests is NOT public — visible only to the requester themselves,
+-- or to the leader/officer of the guild the request is against (so they can
+-- see incoming applications/manage outgoing invites in the Recruitment
+-- panel). All writes go through the SECURITY DEFINER functions below.
+drop policy if exists "guild requests are visible to the requester or guild management" on guild_requests;
+create policy "guild requests are visible to the requester or guild management" on guild_requests
+  for select using (
+    profile_id = auth.uid()
+    or exists (
+      select 1 from guild_members gm
+      where gm.guild_id = guild_requests.guild_id
+        and gm.profile_id = auth.uid()
+        and gm.role in ('leader', 'officer')
+    )
+  );
 
 drop policy if exists "item catalog is publicly readable" on items;
 create policy "item catalog is publicly readable" on items for select using (true);
@@ -339,9 +385,8 @@ declare
   gained_xp bigint;
   gained_gold bigint;
   lvl int;
-  my_guild_id uuid;
-  boss guild_bosses%rowtype;
-  dmg bigint := 0;
+  dmg bigint := 0; -- guild bosses are disabled for now (see 4c below); kept
+                    -- in the return signature so callers don't need to change
 begin
   select * into p from profiles where id = auth.uid();
   if not found then
@@ -368,18 +413,7 @@ begin
         last_active_at = now()
     where id = p.id;
 
-  -- feed a slice of this tick's XP to the active guild boss, if any
-  select gm.guild_id into my_guild_id from guild_members gm where gm.profile_id = p.id;
-  if my_guild_id is not null then
-    boss := get_or_spawn_active_boss(my_guild_id);
-    if boss.id is not null then
-      dmg := greatest(0, floor(gained_xp * 0.2)); -- TUNE: idle contribution rate
-      if dmg > 0 then
-        perform apply_boss_damage(boss.id, p.id, dmg, 'idle');
-      end if;
-    end if;
-  end if;
-
+  -- guild bosses are disabled for now — no idle damage is fed to them.
   return query select gained_xp, gained_gold, lvl, dmg;
 end;
 $$;
@@ -816,7 +850,24 @@ begin
 end;
 $$;
 
-create or replace function join_guild(p_guild_id uuid)
+-- Replaced by the application/invite flow below — guilds are no longer
+-- free-join. Dropped explicitly (not just superseded by CREATE OR REPLACE)
+-- since nothing recreates it under this name/signature anymore.
+drop function if exists join_guild(uuid);
+
+-- ----------------------------------------------------------------------------
+-- 6a2. Guild applications & invites
+--    Two-sided: a player applies to a guild (apply_to_guild) or a
+--    leader/officer invites a player (invite_to_guild). Either side can be
+--    accepted or declined by the other party (respond_to_application /
+--    respond_to_invite), and the sender of either can cancel/revoke it
+--    (cancel_guild_request). The partial unique index on guild_requests
+--    stops a duplicate pending request of the same type/guild/player from
+--    piling up; a friendly check here gives a clearer error than the
+--    underlying unique-violation would.
+-- ----------------------------------------------------------------------------
+
+create or replace function apply_to_guild(p_guild_id uuid)
 returns void
 language plpgsql
 security definer
@@ -838,7 +889,171 @@ begin
     raise exception 'guild is full';
   end if;
 
-  insert into guild_members (guild_id, profile_id, role) values (p_guild_id, auth.uid(), 'member');
+  if exists (
+    select 1 from guild_requests
+    where guild_id = p_guild_id and profile_id = auth.uid()
+      and type = 'application' and status = 'pending'
+  ) then
+    raise exception 'you already have a pending application to that guild';
+  end if;
+
+  insert into guild_requests (guild_id, profile_id, type) values (p_guild_id, auth.uid(), 'application');
+end;
+$$;
+
+create or replace function invite_to_guild(p_username text)
+returns void
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  my_guild_id uuid;
+  my_role text;
+  target_id uuid;
+  member_count int;
+  cap int;
+begin
+  select gm.guild_id, gm.role into my_guild_id, my_role from guild_members gm where gm.profile_id = auth.uid();
+  if my_guild_id is null then raise exception 'you are not in a guild'; end if;
+  if my_role not in ('leader', 'officer') then raise exception 'only the guild leader or an officer can send invites'; end if;
+
+  select id into target_id from profiles where lower(username) = lower(p_username);
+  if target_id is null then raise exception 'no character with that name'; end if;
+
+  if exists (select 1 from guild_members where profile_id = target_id) then
+    raise exception 'that player is already in a guild';
+  end if;
+
+  select member_cap into cap from guilds where id = my_guild_id;
+  select count(*) into member_count from guild_members where guild_id = my_guild_id;
+  if member_count >= cap then
+    raise exception 'your guild is full';
+  end if;
+
+  if exists (
+    select 1 from guild_requests
+    where guild_id = my_guild_id and profile_id = target_id
+      and type = 'invite' and status = 'pending'
+  ) then
+    raise exception 'that player already has a pending invite from your guild';
+  end if;
+
+  insert into guild_requests (guild_id, profile_id, type) values (my_guild_id, target_id, 'invite');
+end;
+$$;
+
+-- shared by respond_to_application/respond_to_invite: actually seats the
+-- player once a request is accepted, re-checking the guild isn't full and
+-- clearing out that player's other now-moot pending requests.
+create or replace function accept_guild_request(p_request_id uuid, p_guild_id uuid, p_profile_id uuid)
+returns void
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  member_count int;
+  cap int;
+begin
+  if exists (select 1 from guild_members where profile_id = p_profile_id) then
+    raise exception 'that player is already in a guild';
+  end if;
+
+  select member_cap into cap from guilds where id = p_guild_id;
+  select count(*) into member_count from guild_members where guild_id = p_guild_id;
+  if member_count >= cap then
+    raise exception 'guild is full';
+  end if;
+
+  insert into guild_members (guild_id, profile_id, role) values (p_guild_id, p_profile_id, 'member');
+
+  update guild_requests set status = 'accepted' where id = p_request_id;
+  update guild_requests set status = 'cancelled'
+    where profile_id = p_profile_id and status = 'pending' and id <> p_request_id;
+end;
+$$;
+
+create or replace function respond_to_application(p_request_id uuid, p_accept boolean)
+returns void
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  r guild_requests%rowtype;
+  my_role text;
+begin
+  select * into r from guild_requests where id = p_request_id;
+  if not found or r.type <> 'application' or r.status <> 'pending' then
+    raise exception 'that application is no longer pending';
+  end if;
+
+  select role into my_role from guild_members where guild_id = r.guild_id and profile_id = auth.uid();
+  if my_role not in ('leader', 'officer') then
+    raise exception 'only the guild leader or an officer can decide applications';
+  end if;
+
+  if p_accept then
+    perform accept_guild_request(r.id, r.guild_id, r.profile_id);
+  else
+    update guild_requests set status = 'declined' where id = r.id;
+  end if;
+end;
+$$;
+
+create or replace function respond_to_invite(p_request_id uuid, p_accept boolean)
+returns void
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  r guild_requests%rowtype;
+begin
+  select * into r from guild_requests where id = p_request_id;
+  if not found or r.type <> 'invite' or r.status <> 'pending' then
+    raise exception 'that invite is no longer pending';
+  end if;
+  if r.profile_id <> auth.uid() then
+    raise exception 'that invite is not addressed to you';
+  end if;
+
+  if p_accept then
+    perform accept_guild_request(r.id, r.guild_id, r.profile_id);
+  else
+    update guild_requests set status = 'declined' where id = r.id;
+  end if;
+end;
+$$;
+
+create or replace function cancel_guild_request(p_request_id uuid)
+returns void
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  r guild_requests%rowtype;
+  my_role text;
+begin
+  select * into r from guild_requests where id = p_request_id;
+  if not found or r.status <> 'pending' then
+    raise exception 'that request is no longer pending';
+  end if;
+
+  if r.type = 'application' then
+    if r.profile_id <> auth.uid() then
+      raise exception 'you can only cancel your own applications';
+    end if;
+  else -- invite
+    select role into my_role from guild_members where guild_id = r.guild_id and profile_id = auth.uid();
+    if my_role not in ('leader', 'officer') then
+      raise exception 'only the guild leader or an officer can revoke an invite';
+    end if;
+  end if;
+
+  update guild_requests set status = 'cancelled' where id = r.id;
 end;
 $$;
 

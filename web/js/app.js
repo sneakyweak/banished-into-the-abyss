@@ -10,12 +10,10 @@ const state = {
   guild: null,        // { id, name, tag, ... }
   myRole: null,       // this player's role in state.guild: 'leader' | 'officer' | 'member' | null
   members: [],
-  boss: null,
   enemy: null,         // { enemy_key, enemy_hp, name, max_hp, attack, xp_reward, gold_reward }
   activeTab: "global", // 'global' | 'guild' | 'whispers'
   chatChannelSub: null,
   whisperSub: null,
-  bossSub: null,
   tickTimer: null,
 };
 
@@ -161,7 +159,6 @@ function leaveGame() {
   clearInterval(state.tickTimer);
   if (state.chatChannelSub) sb.removeChannel(state.chatChannelSub);
   if (state.whisperSub) sb.removeChannel(state.whisperSub);
-  if (state.bossSub) sb.removeChannel(state.bossSub);
   state.user = null;
   state.profile = null;
   state.guild = null;
@@ -203,9 +200,15 @@ function renderProfile() {
   $("stat-xp").textContent = p.xp;
   $("stat-gold").textContent = p.gold;
   $("stat-prowess").textContent = p.abyssal_prowess;
-  $("stat-attack").textContent = p.attack;
   $("stat-actions").textContent = p.actions;
   $("stat-max-actions").textContent = p.max_actions;
+
+  $("stat-power").textContent = p.attack;
+  $("stat-defense").textContent = p.defense;
+  $("stat-attack-speed").textContent = p.attack_speed;
+  $("stat-crit").textContent = `${p.crit}%`;
+  $("stat-multi-strike").textContent = `${p.multi_strike}%`;
+  $("stat-speed").textContent = p.speed;
 
   const hpPct = Math.max(0, Math.min(100, (p.hp / p.max_hp) * 100));
   $("player-hp-fill").style.width = hpPct + "%";
@@ -214,7 +217,7 @@ function renderProfile() {
 
 // ---------------------------------------------------------------------------
 // Solo enemy combat (Test Rat) — drives the Current Battle panel's player
-// vs. enemy display independently of guilds/guild bosses.
+// vs. enemy display independently of guilds.
 // ---------------------------------------------------------------------------
 
 const TEST_ENEMY_KEY = "test_rat";
@@ -310,7 +313,6 @@ async function doTick() {
   const { data, error } = await sb.rpc("perform_idle_tick");
   if (error) return console.error(error);
   const row = data?.[0];
-  if (state.guild) refreshBoss();
 
   // one auto-strike against the current enemy per tick — costs 1 action,
   // stops gracefully once the pool is empty (see autoStrikeEnemy above)
@@ -320,10 +322,7 @@ async function doTick() {
 
   const parts = [];
   if (row && (row.xp_gained > 0 || row.gold_gained > 0)) {
-    parts.push(
-      `+${row.xp_gained} xp, +${row.gold_gained} gold` +
-        (row.boss_damage > 0 ? `, ${row.boss_damage} idle dmg to guild boss` : "")
-    );
+    parts.push(`+${row.xp_gained} xp, +${row.gold_gained} gold`);
   }
   if (strikeMsg) parts.push(strikeMsg);
   if (parts.length) $("tick-log").textContent = parts.join("  •  ");
@@ -337,10 +336,9 @@ $("btn-refresh-actions").addEventListener("click", async () => {
 
 // ---------------------------------------------------------------------------
 // Guild
-//    Guild management (create/join/leave, members, boss status) lives in an
-//    overlay now instead of on the main page — opened from the "Guild" nav
-//    pill. The guild boss no longer has a manual strike button; it's fed
-//    purely by idle-tick damage (see perform_idle_tick in schema.sql).
+//    Guild management (create/apply/invite/leave, members, recruitment)
+//    lives in an overlay instead of on the main page — opened from the
+//    "Guild" nav pill. Guild bosses are disabled for now.
 // ---------------------------------------------------------------------------
 
 $("nav-guild-btn").addEventListener("click", () => {
@@ -417,6 +415,7 @@ async function loadGuildMembership() {
     $("in-guild").classList.add("hidden");
     $("guild-settings").classList.add("hidden");
     await loadGuildList();
+    await loadMyRequests();
     return;
   }
 
@@ -428,9 +427,8 @@ async function loadGuildMembership() {
   $("guild-heading").textContent = `${guild.name} [${guild.tag}]`;
 
   await loadMembers();
-  await refreshBoss();
+  await loadGuildRecruitment();
   subscribeChat("guild"); // re-subscribe once we know the guild id (channel name depends on it)
-  subscribeBoss();
 }
 
 async function loadGuildList() {
@@ -441,13 +439,16 @@ async function loadGuildList() {
     const row = document.createElement("div");
     row.textContent = `${g.name} [${g.tag}] `;
     const btn = document.createElement("button");
-    btn.textContent = "Join";
-    btn.onclick = () => joinGuild(g.id);
+    btn.textContent = "Apply";
+    btn.onclick = () => applyToGuild(g.id);
     row.appendChild(btn);
     box.appendChild(row);
   });
 }
-$("btn-refresh-guilds").addEventListener("click", loadGuildList);
+$("btn-refresh-guilds").addEventListener("click", () => {
+  loadGuildList();
+  loadMyRequests();
+});
 
 $("btn-create-guild").addEventListener("click", async () => {
   const name = $("guild-name").value.trim();
@@ -457,11 +458,172 @@ $("btn-create-guild").addEventListener("click", async () => {
   await loadGuildMembership();
 });
 
-async function joinGuild(guildId) {
-  const { error } = await sb.rpc("join_guild", { p_guild_id: guildId });
+async function applyToGuild(guildId) {
+  const { error } = await sb.rpc("apply_to_guild", { p_guild_id: guildId });
   if (error) return alert(error.message);
-  await loadGuildMembership();
+  await loadMyRequests();
 }
+
+// ---------------------------------------------------------------------------
+// Guild requests — applications (player -> guild) and invites (guild ->
+// player). Both sides get rendered from the same guild_requests table:
+// "Your Invites"/"Your Applications" when you're not in a guild, and the
+// Recruitment panel (leader/officer only) when you are.
+// ---------------------------------------------------------------------------
+
+function emptyLi() {
+  const li = document.createElement("li");
+  li.className = "log";
+  li.textContent = "None.";
+  return li;
+}
+
+function buildRequestLi(labelText, buttons) {
+  const li = document.createElement("li");
+  const label = document.createElement("span");
+  label.textContent = labelText;
+  li.appendChild(label);
+  const btnBox = document.createElement("span");
+  buttons.forEach(([text, onClick]) => {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "btn-ghost";
+    btn.textContent = text;
+    btn.addEventListener("click", onClick);
+    btnBox.appendChild(btn);
+  });
+  li.appendChild(btnBox);
+  return li;
+}
+
+async function loadMyRequests() {
+  const { data } = await sb
+    .from("guild_requests")
+    .select("id, type, status, guild_id, guilds(name, tag)")
+    .eq("profile_id", state.user.id)
+    .eq("status", "pending");
+
+  const invites = (data || []).filter((r) => r.type === "invite");
+  const applications = (data || []).filter((r) => r.type === "application");
+
+  const invUl = $("my-invites-list");
+  invUl.innerHTML = "";
+  if (!invites.length) invUl.appendChild(emptyLi());
+  invites.forEach((r) => {
+    invUl.appendChild(
+      buildRequestLi(`${r.guilds.name} [${r.guilds.tag}]`, [
+        [
+          "Accept",
+          async () => {
+            const { error } = await sb.rpc("respond_to_invite", { p_request_id: r.id, p_accept: true });
+            if (error) return alert(error.message);
+            await loadGuildMembership();
+          },
+        ],
+        [
+          "Decline",
+          async () => {
+            const { error } = await sb.rpc("respond_to_invite", { p_request_id: r.id, p_accept: false });
+            if (error) return alert(error.message);
+            await loadMyRequests();
+          },
+        ],
+      ])
+    );
+  });
+
+  const appUl = $("my-applications-list");
+  appUl.innerHTML = "";
+  if (!applications.length) appUl.appendChild(emptyLi());
+  applications.forEach((r) => {
+    appUl.appendChild(
+      buildRequestLi(`${r.guilds.name} [${r.guilds.tag}] — pending`, [
+        [
+          "Cancel",
+          async () => {
+            const { error } = await sb.rpc("cancel_guild_request", { p_request_id: r.id });
+            if (error) return alert(error.message);
+            await loadMyRequests();
+          },
+        ],
+      ])
+    );
+  });
+}
+
+async function loadGuildRecruitment() {
+  if (!state.guild) return;
+  const canManage = state.myRole === "leader" || state.myRole === "officer";
+  $("guild-recruitment").classList.toggle("hidden", !canManage);
+  if (!canManage) return;
+
+  const { data } = await sb
+    .from("guild_requests")
+    .select("id, type, status, profile_id, profiles(username, level)")
+    .eq("guild_id", state.guild.id)
+    .eq("status", "pending");
+
+  const applications = (data || []).filter((r) => r.type === "application");
+  const invites = (data || []).filter((r) => r.type === "invite");
+
+  const appUl = $("pending-applications-list");
+  appUl.innerHTML = "";
+  if (!applications.length) appUl.appendChild(emptyLi());
+  applications.forEach((r) => {
+    appUl.appendChild(
+      buildRequestLi(`${r.profiles.username} — Lv${r.profiles.level}`, [
+        [
+          "Accept",
+          async () => {
+            const { error } = await sb.rpc("respond_to_application", { p_request_id: r.id, p_accept: true });
+            if (error) return alert(error.message);
+            await loadMembers();
+            await loadGuildRecruitment();
+          },
+        ],
+        [
+          "Decline",
+          async () => {
+            const { error } = await sb.rpc("respond_to_application", { p_request_id: r.id, p_accept: false });
+            if (error) return alert(error.message);
+            await loadGuildRecruitment();
+          },
+        ],
+      ])
+    );
+  });
+
+  const invUl = $("pending-invites-list");
+  invUl.innerHTML = "";
+  if (!invites.length) invUl.appendChild(emptyLi());
+  invites.forEach((r) => {
+    invUl.appendChild(
+      buildRequestLi(`${r.profiles.username} — pending`, [
+        [
+          "Revoke",
+          async () => {
+            const { error } = await sb.rpc("cancel_guild_request", { p_request_id: r.id });
+            if (error) return alert(error.message);
+            await loadGuildRecruitment();
+          },
+        ],
+      ])
+    );
+  });
+}
+
+$("btn-send-invite").addEventListener("click", async () => {
+  const username = $("invite-username").value.trim();
+  $("invite-error").textContent = "";
+  if (!username) return;
+  const { error } = await sb.rpc("invite_to_guild", { p_username: username });
+  if (error) {
+    $("invite-error").textContent = error.message;
+    return;
+  }
+  $("invite-username").value = "";
+  await loadGuildRecruitment();
+});
 
 $("btn-leave-guild").addEventListener("click", async () => {
   if (!confirm("Leave your guild?")) return;
@@ -566,47 +728,6 @@ function renderRankEditor() {
       li.appendChild(makeLeaderBtn);
       ul.appendChild(li);
     });
-}
-
-async function refreshBoss() {
-  if (!state.guild) return;
-  const { data } = await sb
-    .from("guild_bosses")
-    .select("*")
-    .eq("guild_id", state.guild.id)
-    .order("spawned_at", { ascending: false })
-    .limit(1)
-    .maybeSingle();
-  state.boss = data;
-  renderBoss();
-}
-
-function renderBoss() {
-  const b = state.boss;
-  if (!b) {
-    $("boss-name").textContent = "No boss has spawned yet — strike or tick to summon one.";
-    $("boss-hp-fill").style.width = "0%";
-    $("boss-hp-text").textContent = "";
-    return;
-  }
-  $("boss-name").textContent = b.name + (b.defeated_at ? " (defeated — respawning soon)" : "");
-  const pct = Math.max(0, Math.min(100, (b.current_hp / b.max_hp) * 100));
-  $("boss-hp-fill").style.width = pct + "%";
-  $("boss-hp-text").textContent = `${b.current_hp} / ${b.max_hp} HP`;
-}
-
-
-function subscribeBoss() {
-  if (state.bossSub) sb.removeChannel(state.bossSub);
-  if (!state.guild) return;
-  state.bossSub = sb
-    .channel(`boss:${state.guild.id}`)
-    .on(
-      "postgres_changes",
-      { event: "*", schema: "public", table: "guild_bosses", filter: `guild_id=eq.${state.guild.id}` },
-      () => refreshBoss()
-    )
-    .subscribe();
 }
 
 // ---------------------------------------------------------------------------
