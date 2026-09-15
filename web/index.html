@@ -44,18 +44,22 @@
         <button type="button" class="class-card" data-class="warrior">
           <img src="img/class-warrior-full.jpg" alt="Warrior" />
           <span class="class-name">Warrior</span>
+          <span class="class-bonus">+5% HP<br />+5% Defense<br />+5% Power</span>
         </button>
         <button type="button" class="class-card" data-class="archer">
           <img src="img/class-archer-full.jpg" alt="Archer" />
           <span class="class-name">Archer</span>
+          <span class="class-bonus">+10% Crit<br />+10% Power<br />-5% Defense</span>
         </button>
         <button type="button" class="class-card" data-class="magi">
           <img src="img/class-magi-full.jpg" alt="Magi" />
           <span class="class-name">Magi</span>
+          <span class="class-bonus">+10% Multi Strike<br />+10% Crit<br />+5% Power<br />-20% Defense</span>
         </button>
         <button type="button" class="class-card" data-class="striker">
           <img src="img/class-striker-full.jpg" alt="Striker" />
           <span class="class-name">Striker</span>
+          <span class="class-bonus">+20% Multi Strike<br />-20% Crit<br />-10% Defense</span>
         </button>
       </div>
     </div>
@@ -319,6 +323,32 @@
         <li><span class="stat-label">Abyssal Prowess</span><span id="banish-prowess">0</span></li>
         <li><span class="stat-label">Retention This Banishment</span><span id="banish-pct">0.25%</span></li>
       </ul>
+      <div class="panel-divider"></div>
+      <div class="class-picker">
+        <h3 class="panel-subtitle">Choose Your Class For The Next Life</h3>
+        <div class="class-grid" id="banish-class-grid">
+          <button type="button" class="class-card" data-class="warrior">
+            <img src="img/class-warrior-full.jpg" alt="Warrior" />
+            <span class="class-name">Warrior</span>
+            <span class="class-bonus">+5% HP<br />+5% Defense<br />+5% Power</span>
+          </button>
+          <button type="button" class="class-card" data-class="archer">
+            <img src="img/class-archer-full.jpg" alt="Archer" />
+            <span class="class-name">Archer</span>
+            <span class="class-bonus">+10% Crit<br />+10% Power<br />-5% Defense</span>
+          </button>
+          <button type="button" class="class-card" data-class="magi">
+            <img src="img/class-magi-full.jpg" alt="Magi" />
+            <span class="class-name">Magi</span>
+            <span class="class-bonus">+10% Multi Strike<br />+10% Crit<br />+5% Power<br />-20% Defense</span>
+          </button>
+          <button type="button" class="class-card" data-class="striker">
+            <img src="img/class-striker-full.jpg" alt="Striker" />
+            <span class="class-name">Striker</span>
+            <span class="class-bonus">+20% Multi Strike<br />-20% Crit<br />-10% Defense</span>
+          </button>
+        </div>
+      </div>
       <button id="btn-perform-banish" disabled>Banish Your Character</button>
       <p id="banish-error" class="error"></p>
       <p id="banish-lock-note" class="log">Reach level 100 to unlock banishment.</p>
@@ -345,13 +375,10 @@
        brand-new visitor never sees it — only a browser that previously
        stored a different version. -->
   <script>
-    window.APP_VERSION = "11";
+    window.APP_VERSION = "12";
     window.PATCH_NOTES = [
-      "Combat overhaul: you now fight a full pack of enemies at once, each with their own HP bar, instead of one enemy at a time.",
-      "New difficulty controls below Refresh Actions: Number of Affixes, Number of Enemies Spawned, Player Debuffs, and Number of Banishments — pick your own risk/reward mix, including pushing above your own banishment tier for bigger rewards.",
-      "Rebuilt the damage formula so it scales smoothly forever without number bloat, and supports the new affixes (enemy-side) and debuffs (player-side) shown above the battle log.",
-      "Fixed: XP and gold are now only ever granted on a win — idle income and combat results are shown as separate lines so a loss can no longer look like it paid out.",
-      "Fixed: your character portrait no longer flashes the default Warrior art for a moment before switching to your actual class on page load.",
+      "Classes now have real starting bonuses instead of being purely cosmetic — Warrior (+5% HP/Defense/Power), Archer (+10% Crit/Power, -5% Defense), Magi (+10% Multi Strike/Crit, +5% Power, -20% Defense), Striker (+20% Multi Strike, -20% Crit, -10% Defense). Shown right on the class-select screen.",
+      "You now choose your class again each time you Banish, instead of being stuck with your first pick forever.",
     ];
   </script>
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js"></script>

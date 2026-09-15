@@ -213,6 +213,13 @@ body {
   letter-spacing: 1px;
   color: var(--dim);
 }
+.class-card .class-bonus {
+  font-size: 0.65rem;
+  line-height: 1.4;
+  color: var(--dim);
+  opacity: 0.85;
+}
+.class-card.selected .class-bonus { color: var(--accent-bright); opacity: 1; }
 .class-card:hover { border-color: var(--accent); }
 .class-card.selected {
   border-color: var(--accent-bright);

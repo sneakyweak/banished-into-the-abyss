@@ -289,6 +289,19 @@ create table if not exists debuff_defs (
   mods         jsonb not null default '{}'::jsonb
 );
 
+-- Per-class starting bonuses (see §"Starting class bonuses" seed data near
+-- the bottom of this file for the actual numbers/rationale). Same
+-- key/name/description/mods shape as affix_defs/debuff_defs on purpose —
+-- these are just another modifier-bundle source merged into player_mods in
+-- strike_enemy() below, keyed off profiles.class instead of an active
+-- affix/debuff roll.
+create table if not exists class_defs (
+  key          text primary key,
+  name         text not null,
+  description  text not null,
+  mods         jsonb not null default '{}'::jsonb
+);
+
 create table if not exists chat_messages (
   id          bigint generated always as identity primary key,
   channel     text not null,          -- 'global' or 'guild:<guild-uuid>'
@@ -422,6 +435,10 @@ create policy "affix catalog is publicly readable" on affix_defs for select usin
 alter table debuff_defs enable row level security;
 drop policy if exists "debuff catalog is publicly readable" on debuff_defs;
 create policy "debuff catalog is publicly readable" on debuff_defs for select using (true);
+
+alter table class_defs enable row level security;
+drop policy if exists "class catalog is publicly readable" on class_defs;
+create policy "class catalog is publicly readable" on class_defs for select using (true);
 
 drop policy if exists "global chat is publicly readable" on chat_messages;
 create policy "global chat is publicly readable" on chat_messages
@@ -1057,7 +1074,8 @@ declare
   round_hits jsonb;
   debuff_mod_bundles jsonb;
   affix_mod_bundles jsonb;
-  player_mods jsonb;   -- merged from active debuffs
+  class_mods jsonb;    -- this class's permanent bonus bundle (class_defs)
+  player_mods jsonb;   -- merged from active debuffs + the player's class bonus
   enemy_mods jsonb;    -- merged from active affixes (applies pack-wide)
   hp_pct numeric;
   reward_mult numeric;
@@ -1100,7 +1118,8 @@ begin
     from debuff_defs where key in (select jsonb_array_elements_text(pc.debuff_keys));
   select coalesce(jsonb_agg(mods), '[]'::jsonb) into affix_mod_bundles
     from affix_defs where key in (select jsonb_array_elements_text(pc.affix_keys));
-  player_mods := sum_mods(debuff_mod_bundles);
+  select coalesce(mods, '{}'::jsonb) into class_mods from class_defs where key = p.class;
+  player_mods := sum_mods(debuff_mod_bundles || jsonb_build_array(coalesce(class_mods, '{}'::jsonb)));
   enemy_mods := sum_mods(affix_mod_bundles);
   hp_pct := mod_val(enemy_mods, 'hp_pct');
 
@@ -1148,7 +1167,7 @@ begin
         -- member (re-hitting the same one if it's the last one standing) —
         -- this is what makes the stat directly valuable against a pack,
         -- not just a flat extra hit on a single target.
-        if random() < (p.multi_strike / 100.0) then
+        if random() < (greatest(0, p.multi_strike + mod_val(player_mods, 'multi_strike_flat')) / 100.0) then
           select min(idx - 1) into target_idx
             from jsonb_array_elements(cur_pack) with ordinality as t(elem, idx)
             where (elem->>'hp')::int > 0;
@@ -1255,8 +1274,11 @@ $$;
 --    they keep Abyssal Prowess (a permanent meta-currency, +1 Depth per
 --    banishment) plus a slice of their current attack/defense/max_hp,
 --    sized by how much Abyssal Prowess they'd already banked BEFORE this
---    banishment. Every constant below is a first-pass number — TUNE once
---    this is actually playtested.
+--    banishment. They also choose their class fresh for the new life
+--    (p_new_class) — same 4-option choice as initial signup, and just as
+--    consequential, since class_defs' bonus bundle (see its seed data
+--    above) applies for the whole next run. Every constant below is a
+--    first-pass number — TUNE once this is actually playtested.
 -- ----------------------------------------------------------------------------
 
 create table if not exists banishments (
@@ -1273,7 +1295,7 @@ alter table banishments enable row level security;
 drop policy if exists "banishment history is publicly readable" on banishments;
 create policy "banishment history is publicly readable" on banishments for select using (true);
 
-create or replace function perform_banishment()
+create or replace function perform_banishment(p_new_class text default null)
 returns profiles
 language plpgsql
 security definer
@@ -1296,6 +1318,14 @@ begin
 
   if p.level < 100 then
     raise exception 'you must reach level 100 before you can banish your character';
+  end if;
+
+  -- players choose their class fresh on every banishment (same 4 options
+  -- as initial signup). Omitting p_new_class (or passing null) keeps
+  -- whatever class they already had, so older callers / a stray retry
+  -- without the arg don't accidentally reset it.
+  if p_new_class is not null and p_new_class not in ('warrior','archer','magi','striker') then
+    raise exception 'invalid class: %', p_new_class;
   end if;
 
   -- retention tier is based on Abyssal Prowess already banked from PAST
@@ -1327,6 +1357,7 @@ begin
     gold            = 0,
     depth           = depth + 1,             -- each banishment pushes you one Depth deeper
     abyssal_prowess = abyssal_prowess + prowess_gain,
+    class           = coalesce(p_new_class, class),
     attack          = new_attack,
     defense         = new_defense,
     max_hp          = new_max_hp,
@@ -2010,4 +2041,31 @@ insert into debuff_defs (key, name, description, mods) values
   ('exposed',  'Exposed',  'Your Defense is reduced for this fight.',    '{"defense_pct": -25}'::jsonb),
   ('fragile',  'Fragile',  'Your max HP is reduced for this fight.',     '{"hp_pct": -20}'::jsonb),
   ('clumsy',   'Clumsy',   'Your Crit chance is reduced for this fight.','{"crit_chance_flat": -10}'::jsonb)
+on conflict (key) do update set name = excluded.name, description = excluded.description, mods = excluded.mods;
+
+-- Starting class bonuses. These are permanent, always-active modifier
+-- bundles (same vocabulary compute_damage()/strike_enemy() already read for
+-- affixes/debuffs) merged into player_mods on every strike_enemy() call,
+-- keyed off profiles.class — NOT applied to the profiles.attack/defense/
+-- max_hp/crit/multi_strike columns themselves. Every class shares the same
+-- base columns; the bonus only ever shows up in combat math. That's
+-- deliberate: those base stats start tiny (attack=1, defense=1, hp=10), so
+-- a flat percent of them would mostly round away to nothing at level 1 —
+-- applying the bonus at combat-resolution time instead means it's real
+-- immediately (crit/multi-strike bonuses especially, since those start at
+-- 0) and it keeps scaling correctly forever as attack/defense/hp grow from
+-- Banishment retention and (eventually) gear, with zero extra plumbing.
+-- multi_strike_flat is a new mods key (flat percentage-point add to
+-- profiles.multi_strike) — Multi Strike's roll happens directly in
+-- strike_enemy() rather than inside compute_damage(), so it's read there
+-- explicitly rather than via compute_damage's p_atk_mods.
+insert into class_defs (key, name, description, mods) values
+  ('warrior', 'Warrior', '+5% HP, +5% Defense, +5% Power',
+    '{"hp_pct": 5, "defense_pct": 5, "attack_pct": 5}'::jsonb),
+  ('archer',  'Archer',  '+10% Crit, +10% Power, -5% Defense',
+    '{"crit_chance_flat": 10, "attack_pct": 10, "defense_pct": -5}'::jsonb),
+  ('magi',    'Magi',    '+10% Multi Strike, +10% Crit, +5% Power, -20% Defense',
+    '{"multi_strike_flat": 10, "crit_chance_flat": 10, "attack_pct": 5, "defense_pct": -20}'::jsonb),
+  ('striker', 'Striker', '+20% Multi Strike, -20% Crit, -10% Defense',
+    '{"multi_strike_flat": 20, "crit_chance_flat": -20, "defense_pct": -10}'::jsonb)
 on conflict (key) do update set name = excluded.name, description = excluded.description, mods = excluded.mods;

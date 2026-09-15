@@ -7,6 +7,7 @@ const state = {
   user: null,
   profile: null,
   selectedClass: null, // 'warrior' | 'archer' | 'magi' | 'striker' — chosen on the auth screen before signup
+  selectedBanishClass: null, // same 4 options, chosen in the banish overlay before re-banishing (defaults to the character's current class each time the overlay opens)
   guild: null,        // { id, name, tag, ... }
   myRole: null,       // this player's role in state.guild: 'leader' | 'officer' | 'member' | null
   members: [],
@@ -256,9 +257,13 @@ const CLASS_PORTRAITS = {
   striker: "img/class-striker-avatar.jpg",
 };
 
-document.querySelectorAll(".class-card").forEach((card) => {
+// Scoped to #class-grid specifically (the auth-screen picker) so it never
+// picks up the near-identical .class-card markup inside the banish overlay
+// (#banish-class-grid, wired separately below) — the two pickers track
+// independent selections (state.selectedClass vs state.selectedBanishClass).
+document.querySelectorAll("#class-grid .class-card").forEach((card) => {
   card.addEventListener("click", () => {
-    document.querySelectorAll(".class-card").forEach((c) => c.classList.remove("selected"));
+    document.querySelectorAll("#class-grid .class-card").forEach((c) => c.classList.remove("selected"));
     card.classList.add("selected");
     state.selectedClass = card.dataset.class;
   });
@@ -360,7 +365,7 @@ function leaveGame() {
   state.profile = null;
   state.guild = null;
   state.selectedClass = null;
-  document.querySelectorAll(".class-card").forEach((c) => c.classList.remove("selected"));
+  document.querySelectorAll("#class-grid .class-card").forEach((c) => c.classList.remove("selected"));
   $("btn-signout").classList.add("hidden");
   $("game-screen").classList.add("hidden");
   $("auth-screen").classList.remove("hidden");
@@ -790,6 +795,20 @@ function retentionPctForProwess(prowess) {
   return 0.25;
 }
 
+// Banish-overlay class picker — separate markup/selection from the
+// auth-screen one (#class-grid / state.selectedClass) so picking a class
+// here never touches signup state and vice versa. Defaults to the
+// character's CURRENT class each time the overlay opens (see
+// renderBanishOverlay below), not to null, so "confirm without touching
+// anything" keeps the same class rather than erroring or picking randomly.
+document.querySelectorAll("#banish-class-grid .class-card").forEach((card) => {
+  card.addEventListener("click", () => {
+    document.querySelectorAll("#banish-class-grid .class-card").forEach((c) => c.classList.remove("selected"));
+    card.classList.add("selected");
+    state.selectedBanishClass = card.dataset.class;
+  });
+});
+
 function renderBanishOverlay() {
   const p = state.profile;
   if (!p) return;
@@ -800,6 +819,11 @@ function renderBanishOverlay() {
   $("btn-perform-banish").disabled = !eligible;
   $("banish-lock-note").classList.toggle("hidden", eligible);
   $("banish-error").textContent = "";
+
+  state.selectedBanishClass = p.class;
+  document.querySelectorAll("#banish-class-grid .class-card").forEach((c) => {
+    c.classList.toggle("selected", c.dataset.class === p.class);
+  });
 }
 
 $("nav-banish-btn").addEventListener("click", () => {
@@ -815,7 +839,7 @@ $("banish-overlay").addEventListener("click", (e) => {
 
 $("btn-perform-banish").addEventListener("click", async () => {
   if (!confirm("Sacrifice your character to the Abyss? This cannot be undone.")) return;
-  const { error } = await sb.rpc("perform_banishment");
+  const { error } = await sb.rpc("perform_banishment", { p_new_class: state.selectedBanishClass });
   if (error) {
     $("banish-error").textContent = error.message;
     return;
