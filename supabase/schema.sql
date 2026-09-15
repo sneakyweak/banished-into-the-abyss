@@ -997,11 +997,12 @@ $$;
 --    initiative comparison) — this is a player-facing stat for now.
 --
 --    WIN/LOSS: xp and gold are only ever granted when a pack is fully
---    cleared (event = 'kill') — never on a player death. Clearing a pack
---    also heals the player 10% of their (fight-effective) max HP, on top of
---    xp/gold, before the next pack is rolled. A death fully heals the
---    player and respawns a fresh pack (same selections), same as before,
---    but grants nothing.
+--    cleared (event = 'kill') — never on a player death. Every individual
+--    enemy killed (not just the one that empties the pack) also heals the
+--    player 10% of their (fight-effective) max HP, applied the instant
+--    that kill lands, whether it's the player's primary swing or a Multi
+--    Strike bonus swing. A death fully heals the player and respawns a
+--    fresh pack (same selections), same as before, but grants nothing.
 --
 --    Every individual pack (one player vs. 1-30 spawned enemies) always
 --    runs to a real conclusion — a clear or a player death — rather than
@@ -1718,6 +1719,14 @@ begin
       round_hits := round_hits || jsonb_build_array(jsonb_build_object(
         'source', 'player', 'target', target_idx, 'dmg', hit.dmg, 'crit', hit.was_crit, 'multi_strike', false
       ));
+      -- Kill heal: 10% of this fight's effective max HP, per pack member
+      -- killed (target_idx was only ever selected from hp>0 members above,
+      -- so pre-swing hp is always >0 here -- a kill is exactly this swing's
+      -- damage taking it to <=0). Rewards actually landing kills with a bit
+      -- of breathing room, short of the full heal a death gives.
+      if (member->>'hp')::int - hit.dmg <= 0 then
+        cur_player_hp := least(cur_player_max_hp, cur_player_hp + round(cur_player_max_hp * 0.10)::int);
+      end if;
 
       -- Multi Strike: a bonus swing that CASCADES to the next still-alive
       -- member (re-hitting the same one if it's the last one standing) —
@@ -1736,6 +1745,11 @@ begin
           round_hits := round_hits || jsonb_build_array(jsonb_build_object(
             'source', 'player', 'target', target_idx, 'dmg', hit.dmg, 'crit', hit.was_crit, 'multi_strike', true
           ));
+          -- same kill heal as the primary swing above -- multi strike can
+          -- land its own separate kill this round.
+          if (member->>'hp')::int - hit.dmg <= 0 then
+            cur_player_hp := least(cur_player_max_hp, cur_player_hp + round(cur_player_max_hp * 0.10)::int);
+          end if;
         end if;
       end if;
     end if;
@@ -1751,12 +1765,10 @@ begin
       pack_xp := round(pack_xp * reward_mult);
       pack_gold := round(pack_gold * reward_mult);
 
-      -- Victory heal: 10% of this fight's effective max HP, on top of
-      -- xp/gold -- rewards clearing a pack with a bit of breathing room
-      -- before the next one, short of the full heal a death gives. Applied
-      -- before logging so the round's reported player_hp already reflects
-      -- it.
-      cur_player_hp := least(cur_player_max_hp, cur_player_hp + round(cur_player_max_hp * 0.10)::int);
+      -- No separate heal here anymore -- the kill that just cleared this
+      -- pack already triggered its own 10% kill heal above (every kill
+      -- does now, not just the one that empties the pack), so cur_player_hp
+      -- already reflects it by the time we log the round below.
 
       round_log := round_log || jsonb_build_array(jsonb_build_object(
         'hits', round_hits, 'pack', cur_pack,
