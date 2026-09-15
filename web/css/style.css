@@ -358,6 +358,10 @@ button:disabled { opacity: 0.4; cursor: not-allowed; }
 .banish-tiers li { display: flex; justify-content: space-between; font-size: 0.85rem; border-bottom: 1px dotted var(--border); padding-bottom: 4px; }
 .banish-tiers li span:last-child { color: var(--accent-bright); font-weight: bold; }
 
+.patch-notes-list { margin: 4px 0 12px; padding-left: 18px; display: flex; flex-direction: column; gap: 6px; }
+.patch-notes-list li { font-size: 0.85rem; line-height: 1.4; }
+#new-version-countdown { color: var(--accent-bright); font-weight: bold; text-align: center; }
+
 .guild-heading-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .guild-heading-row h4 { margin: 0; }
 .cogwheel-btn {

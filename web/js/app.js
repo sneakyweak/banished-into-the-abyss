@@ -25,10 +25,16 @@ const $ = (id) => document.getElementById(id);
 //    (index.html) differs from the version that browser last saw — never on
 //    a brand-new visitor's very first load. Runs immediately at script load,
 //    independent of auth state, since it's a site-wide announcement rather
-//    than anything tied to a character.
+//    than anything tied to a character. Lists that build's window.PATCH_NOTES
+//    and counts down to an automatic page refresh (the page is already
+//    running the new code by the time this shows — the refresh is just a
+//    flourish, not a functional requirement — so dismissing the popup
+//    cancels the countdown instead of forcing it).
 // ---------------------------------------------------------------------------
 
 const SEEN_VERSION_KEY = "bita_seen_version";
+const NEW_VERSION_REFRESH_SECONDS = 10;
+let newVersionCountdownTimer = null;
 
 function checkNewVersion() {
   const current = window.APP_VERSION;
@@ -36,20 +42,66 @@ function checkNewVersion() {
   try {
     const seen = localStorage.getItem(SEEN_VERSION_KEY);
     if (seen !== null && seen !== current) {
-      $("new-version-overlay")?.classList.remove("hidden");
+      showNewVersionPopup();
     }
     localStorage.setItem(SEEN_VERSION_KEY, current);
   } catch (e) {
     // localStorage unavailable (private mode, blocked storage, etc.) — skip silently
   }
 }
+
+function showNewVersionPopup() {
+  const notes = Array.isArray(window.PATCH_NOTES) ? window.PATCH_NOTES : [];
+  const list = $("patch-notes-list");
+  if (list) {
+    list.innerHTML = "";
+    notes.forEach((note) => {
+      const li = document.createElement("li");
+      li.textContent = note;
+      list.appendChild(li);
+    });
+  }
+  $("new-version-overlay")?.classList.remove("hidden");
+  startNewVersionCountdown();
+}
+
+function startNewVersionCountdown() {
+  let remaining = NEW_VERSION_REFRESH_SECONDS;
+  const label = $("new-version-countdown");
+  const render = () => {
+    if (label) label.textContent = `Refreshing in ${remaining}s...`;
+  };
+  render();
+  clearInterval(newVersionCountdownTimer);
+  newVersionCountdownTimer = setInterval(() => {
+    remaining -= 1;
+    if (remaining <= 0) {
+      clearInterval(newVersionCountdownTimer);
+      location.reload();
+      return;
+    }
+    render();
+  }, 1000);
+}
+
+function stopNewVersionCountdown() {
+  clearInterval(newVersionCountdownTimer);
+  newVersionCountdownTimer = null;
+  const label = $("new-version-countdown");
+  if (label) label.textContent = "";
+}
+
 checkNewVersion();
 
 $("btn-close-new-version-overlay").addEventListener("click", () => {
   $("new-version-overlay").classList.add("hidden");
+  stopNewVersionCountdown();
 });
 $("new-version-overlay").addEventListener("click", (e) => {
-  if (e.target.id === "new-version-overlay") $("new-version-overlay").classList.add("hidden");
+  if (e.target.id === "new-version-overlay") {
+    $("new-version-overlay").classList.add("hidden");
+    stopNewVersionCountdown();
+  }
 });
 
 const TICK_INTERVAL_MS = 8_000; // how often idle progress checks in automatically

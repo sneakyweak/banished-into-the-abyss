@@ -282,14 +282,27 @@
       <button type="button" id="btn-close-new-version-overlay" class="overlay-close" aria-label="Close">&times;</button>
       <h2 class="panel-title">The Abyss Stirs</h2>
       <p class="log">From the darkness, new power is birthed.</p>
+      <div class="panel-divider"></div>
+      <h3 class="panel-subtitle">Patch Notes</h3>
+      <ul id="patch-notes-list" class="patch-notes-list"></ul>
+      <p id="new-version-countdown" class="log"></p>
     </div>
   </div>
 
-  <!-- Bump this on every shipped build (any deploy of app.js/index.html/etc.)
-       so returning players who last loaded an older version see the
-       new-version popup above exactly once. A brand-new visitor never sees
-       it — only a browser that previously stored a different version. -->
-  <script>window.APP_VERSION = "2";</script>
+  <!-- Bump APP_VERSION on every shipped build (any deploy of
+       app.js/index.html/etc.) and replace PATCH_NOTES with that build's
+       notes, so returning players who last loaded an older version see the
+       new-version popup above — with these notes — exactly once. A
+       brand-new visitor never sees it — only a browser that previously
+       stored a different version. -->
+  <script>
+    window.APP_VERSION = "3";
+    window.PATCH_NOTES = [
+      "Combat now plays back round-by-round, so the hp bars actually show who's taking damage instead of jumping straight to the end result.",
+      "Current Battle panel title is now centered.",
+      "Chat moved directly under the Current Battle panel.",
+    ];
+  </script>
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js"></script>
   <script src="js/config.js"></script>
   <script src="js/app.js"></script>
