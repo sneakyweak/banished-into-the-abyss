@@ -271,6 +271,19 @@
     </div>
   </div>
 
+  <div id="new-version-overlay" class="overlay hidden">
+    <div class="panel overlay-panel">
+      <button type="button" id="btn-close-new-version-overlay" class="overlay-close" aria-label="Close">&times;</button>
+      <h2 class="panel-title">The Abyss Stirs</h2>
+      <p class="log">From the darkness, new power is birthed.</p>
+    </div>
+  </div>
+
+  <!-- Bump this on every shipped build (any deploy of app.js/index.html/etc.)
+       so returning players who last loaded an older version see the
+       new-version popup above exactly once. A brand-new visitor never sees
+       it — only a browser that previously stored a different version. -->
+  <script>window.APP_VERSION = "1";</script>
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js"></script>
   <script src="js/config.js"></script>
   <script src="js/app.js"></script>

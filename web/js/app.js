@@ -19,6 +19,39 @@ const state = {
 
 const $ = (id) => document.getElementById(id);
 
+// ---------------------------------------------------------------------------
+// New-version popup
+//    Shown once per browser, only when this page's window.APP_VERSION
+//    (index.html) differs from the version that browser last saw — never on
+//    a brand-new visitor's very first load. Runs immediately at script load,
+//    independent of auth state, since it's a site-wide announcement rather
+//    than anything tied to a character.
+// ---------------------------------------------------------------------------
+
+const SEEN_VERSION_KEY = "bita_seen_version";
+
+function checkNewVersion() {
+  const current = window.APP_VERSION;
+  if (!current) return;
+  try {
+    const seen = localStorage.getItem(SEEN_VERSION_KEY);
+    if (seen !== null && seen !== current) {
+      $("new-version-overlay")?.classList.remove("hidden");
+    }
+    localStorage.setItem(SEEN_VERSION_KEY, current);
+  } catch (e) {
+    // localStorage unavailable (private mode, blocked storage, etc.) — skip silently
+  }
+}
+checkNewVersion();
+
+$("btn-close-new-version-overlay").addEventListener("click", () => {
+  $("new-version-overlay").classList.add("hidden");
+});
+$("new-version-overlay").addEventListener("click", (e) => {
+  if (e.target.id === "new-version-overlay") $("new-version-overlay").classList.add("hidden");
+});
+
 const TICK_INTERVAL_MS = 8_000; // how often idle progress checks in automatically
 
 // drains the action-bar-style tick tracker over TICK_INTERVAL_MS using a
