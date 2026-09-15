@@ -226,9 +226,10 @@ async function loadEnemy() {
   const { data, error } = await sb.rpc("get_or_spawn_player_enemy", { p_enemy_key: TEST_ENEMY_KEY });
   if (error) return console.error(error);
   const pc = Array.isArray(data) ? data[0] : data; // single-row RPC shape varies by PostgREST version
-  const { data: def, error: defErr } = await sb.from("enemies").select("*").eq("key", pc.enemy_key).single();
-  if (defErr) return console.error(defErr);
-  state.enemy = { ...def, enemy_hp: pc.enemy_hp };
+  // get_or_spawn_player_enemy already returns tier-adjusted display name +
+  // max hp (Elite/Champion prefix and scaled stats) — no separate `enemies`
+  // table read needed.
+  state.enemy = { name: pc.display_name, tier: pc.tier, enemy_hp: pc.enemy_hp, max_hp: pc.enemy_max_hp };
   renderEnemy();
 }
 
@@ -242,10 +243,18 @@ function renderEnemy() {
 }
 
 // Fired automatically once per idle tick (see doTick() below) instead of
-// from a button — each call costs 1 action, and the server returns
-// out_of_actions=true (not an error) once the pool hits 0 so this can be
-// called unattended every 8s without throwing. Returns a short message for
-// the tick log, or null if there's nothing worth reporting.
+// from a button. Costs a flat 1 action no matter what — but each call
+// resolves a whole fight in one go (rounds driven by the player's Attack
+// Speed stat, capped at 100 server-side, see strike_enemy in schema.sql)
+// rather than a single swing, rolling real crit/multi-strike/defense math
+// each round. A kill mid-fight respawns instantly into a freshly-rolled
+// tier (normal/Elite/Champion), so the enemy name/hp can change over the
+// course of one call — row.enemy_name/enemy_hp/enemy_max_hp always reflect
+// where the fight ended up. out_of_actions is only ever true when the
+// action pool was already empty before this call started (the flat cost
+// means a fight in progress is never cut short by actions running out
+// mid-way). Returns a short message for the tick log, or null if there's
+// nothing worth reporting (on cooldown, 0 rounds run).
 async function autoStrikeEnemy() {
   const { data, error } = await sb.rpc("strike_enemy", { p_enemy_key: TEST_ENEMY_KEY });
   if (error) {
@@ -255,20 +264,28 @@ async function autoStrikeEnemy() {
   const row = data?.[0];
   if (!row) return null;
 
-  if (row.out_of_actions) {
-    return "Out of actions — click Refresh Actions to keep fighting.";
-  }
-
   if (state.enemy) {
+    state.enemy.name = row.enemy_name;
     state.enemy.enemy_hp = row.enemy_hp;
     state.enemy.max_hp = row.enemy_max_hp;
     renderEnemy();
   }
 
-  const enemyName = state.enemy?.name || "the enemy";
-  return row.enemy_defeated
-    ? `You slew ${enemyName}! +${row.xp_gained} xp, +${row.gold_gained} gold.`
-    : `You struck ${enemyName} for ${row.damage_dealt} damage.`;
+  if (row.rounds_fought === 0) {
+    return row.out_of_actions ? "Out of actions — click Refresh Actions to keep fighting." : null;
+  }
+
+  const enemyName = row.enemy_name || "the enemy";
+  const roundsText = `${row.rounds_fought} round${row.rounds_fought === 1 ? "" : "s"}`;
+  let msg;
+  if (row.kills > 0) {
+    const killsText = row.kills === 1 ? `slew ${enemyName}` : `slew ${enemyName} x${row.kills}`;
+    msg = `You ${killsText} over ${roundsText}! +${row.xp_gained} xp, +${row.gold_gained} gold.`;
+  } else {
+    msg = `You struck ${enemyName} ${roundsText} for ${row.damage_dealt} damage.`;
+  }
+  if (row.out_of_actions) msg += " Out of actions.";
+  return msg;
 }
 
 async function loadInventory() {

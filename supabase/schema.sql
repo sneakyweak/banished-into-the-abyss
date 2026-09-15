@@ -162,19 +162,29 @@ create table if not exists enemies (
   name         text not null,
   max_hp       int not null,
   attack       int not null default 1,
+  defense      int not null default 0,  -- mitigates the player's damage per swing (see strike_enemy)
   xp_reward    int not null default 0,
   gold_reward  int not null default 0
 );
+alter table enemies add column if not exists defense int not null default 0;
+-- "level" (added for the previous rounds-scale-with-enemy-level design,
+-- since superseded by attack_speed-driven round counts + elite/champion
+-- tiers below) never shipped past one iteration — drop it if a project ran
+-- that version of this file.
+alter table enemies drop column if exists level;
 
 create table if not exists player_combat (
   profile_id     uuid primary key references profiles(id) on delete cascade,
   enemy_key      text not null references enemies(key),
   enemy_hp       int not null,
+  enemy_tier     text not null default 'normal' check (enemy_tier in ('normal', 'elite', 'champion')),
   updated_at     timestamptz not null default now(),
   last_strike_at timestamptz -- null until the player's first real strike; kept
                               -- separate from updated_at so spawning/respawning
                               -- an enemy never itself looks like a recent strike
 );
+alter table player_combat add column if not exists enemy_tier text not null default 'normal'
+  check (enemy_tier in ('normal', 'elite', 'champion'));
 
 create table if not exists chat_messages (
   id          bigint generated always as identity primary key,
@@ -458,65 +468,159 @@ $$;
 --    of guild bosses: one enemy at a time, tracked in player_combat.
 --    get_or_spawn_player_enemy() creates/respawns the fight; strike_enemy()
 --    is called automatically once per client idle-tick (every 8s, see
---    app.js doTick()) rather than from a manual button — deal damage, take
---    a counter-hit if the enemy survives, and respawn immediately on
---    defeat so there's always something to fight. Each strike costs 1
---    action; once actions hit 0 it returns out_of_actions instead of
---    striking (no exception, since this fires unattended every tick).
---    This is entirely separate from perform_idle_tick()'s passive xp/gold,
---    which is time-based and keeps accruing offline regardless of actions
---    — only the auto-strike loop is action-gated. No real death penalty
---    yet (hp just resets to max) — a TUNE spot once this becomes a real
---    feature.
+--    app.js doTick()) rather than from a manual button.
+--
+--    Action cost is flat: one fight-tick = 1 action, full stop — however
+--    many rounds that fight takes doesn't change the cost. What DOES scale
+--    with rounds is how much punishment a single action buys you: each
+--    fight resolves a whole round-robin exchange (up to 100 rounds, hard
+--    capped so one DB call can't run unbounded work), and how many rounds
+--    run is driven by the player's Attack Speed stat — attack_speed 1.0
+--    (the default) resolves 10 rounds; a faster attacker gets more swings
+--    for the same action. Every round rolls real combat math off the
+--    Combat Stats panel: Power vs. the enemy's Defense for base damage,
+--    Crit for a double-damage chance, Multi Strike for a chance at a
+--    second swing in the same round, and the enemy's (tier-scaled) Attack
+--    vs. the player's Defense for the counter-hit. Speed isn't wired into
+--    combat yet — noted as a TUNE spot alongside the rest of these numbers
+--    once this gets playtested.
+--
+--    Elite/Champion tiers: every time an enemy spawns or respawns
+--    (including mid-fight, when a kill immediately queues up the next
+--    encounter within the same round-robin) roll_enemy_tier() picks
+--    normal/elite/champion at 85%/10%/5%, and enemy_effective_stats()
+--    scales that enemy's stats and rewards by 1x/1.25x/1.5x accordingly —
+--    tougher, and worth more xp/gold, so drops from a lucky Champion spawn
+--    actually feel different. This is entirely separate from
+--    perform_idle_tick()'s passive xp/gold, which is time-based and keeps
+--    accruing offline regardless of actions — only this auto-strike loop
+--    is action-gated (and, per the above, at a flat 1 action regardless of
+--    how the fight goes). No real death penalty yet (hp just resets to
+--    max) — a TUNE spot once this becomes a real feature.
 -- ----------------------------------------------------------------------------
 
+-- exactly 5% champion, 10% elite, 85% normal — a single random() draw
+-- compared against both thresholds, NOT two independent draws (which would
+-- skew the real odds: elite would land ~14% instead of 10%).
+create or replace function roll_enemy_tier()
+returns text
+language plpgsql
+as $$
+declare
+  v numeric := random();
+begin
+  if v < 0.05 then
+    return 'champion';
+  elsif v < 0.15 then
+    return 'elite';
+  else
+    return 'normal';
+  end if;
+end;
+$$;
+
+-- shared by get_or_spawn_player_enemy() and strike_enemy() so the
+-- elite/champion multiplier math lives in exactly one place. Not itself
+-- exposed as a player action, but callable like any function (it's
+-- read-only/stable, so that's harmless).
+create or replace function enemy_effective_stats(p_enemy_key text, p_tier text)
+returns table (
+  display_name text,
+  eff_max_hp int,
+  eff_attack int,
+  eff_defense int,
+  eff_xp int,
+  eff_gold int
+)
+language plpgsql
+stable
+set search_path = public
+as $$
+declare
+  e enemies%rowtype;
+  mult numeric;
+  prefix text;
+begin
+  select * into e from enemies where key = p_enemy_key;
+  if not found then raise exception 'no such enemy'; end if;
+
+  mult := case p_tier when 'champion' then 1.5 when 'elite' then 1.25 else 1.0 end; -- TUNE
+  prefix := case p_tier when 'champion' then 'Champion ' when 'elite' then 'Elite ' else '' end;
+
+  return query select
+    prefix || e.name,
+    ceil(e.max_hp * mult)::int,
+    ceil(e.attack * mult)::int,
+    ceil(e.defense * mult)::int,
+    ceil(e.xp_reward * mult)::int,
+    ceil(e.gold_reward * mult)::int;
+end;
+$$;
+
+-- Postgres can't CREATE OR REPLACE a function onto a different return
+-- signature — a project that already ran an earlier version of this file
+-- (before display_name/tier existed below, or before that, player_combat)
+-- needs the old one dropped first, or this whole statement fails with
+-- "cannot change return type of existing function". Safe no-op on a
+-- project that's never defined it.
+drop function if exists get_or_spawn_player_enemy(text);
+
 create or replace function get_or_spawn_player_enemy(p_enemy_key text default 'test_rat')
-returns player_combat
+returns table (
+  enemy_key text,
+  display_name text,
+  tier text,
+  enemy_hp int,
+  enemy_max_hp int
+)
 language plpgsql
 security definer
 set search_path = public
 as $$
 declare
   pc player_combat%rowtype;
-  e enemies%rowtype;
+  stats record;
+  new_tier text;
 begin
-  select * into e from enemies where key = p_enemy_key;
-  if not found then raise exception 'no such enemy'; end if;
+  if not exists (select 1 from enemies where key = p_enemy_key) then
+    raise exception 'no such enemy';
+  end if;
 
   select * into pc from player_combat where profile_id = auth.uid();
 
   if not found then
-    insert into player_combat (profile_id, enemy_key, enemy_hp)
-    values (auth.uid(), p_enemy_key, e.max_hp)
-    returning * into pc;
-    return pc;
-  end if;
-
-  if pc.enemy_key <> p_enemy_key or pc.enemy_hp <= 0 then
+    new_tier := roll_enemy_tier();
+    select * into stats from enemy_effective_stats(p_enemy_key, new_tier);
+    insert into player_combat (profile_id, enemy_key, enemy_hp, enemy_tier)
+      values (auth.uid(), p_enemy_key, stats.eff_max_hp, new_tier)
+      returning * into pc;
+  elsif pc.enemy_key <> p_enemy_key or pc.enemy_hp <= 0 then
+    new_tier := roll_enemy_tier();
+    select * into stats from enemy_effective_stats(p_enemy_key, new_tier);
     update player_combat
-      set enemy_key = p_enemy_key, enemy_hp = e.max_hp, updated_at = now()
+      set enemy_key = p_enemy_key, enemy_hp = stats.eff_max_hp, enemy_tier = new_tier, updated_at = now()
       where profile_id = auth.uid()
       returning * into pc;
+  else
+    select * into stats from enemy_effective_stats(pc.enemy_key, pc.enemy_tier);
   end if;
 
-  return pc;
+  return query select pc.enemy_key, stats.display_name, pc.enemy_tier, pc.enemy_hp, stats.eff_max_hp;
 end;
 $$;
 
--- Postgres can't CREATE OR REPLACE a function onto a different return
--- signature — a project that already ran an earlier version of this file
--- (before actions_left/out_of_actions existed below) needs the old one
--- dropped first, or this whole statement fails with "cannot change return
--- type of existing function" and the old, un-action-gated strike_enemy
--- stays live. Safe no-op on a project that's never defined it.
+-- same reasoning as the drop above this signature has changed more than
+-- once now (single-swing -> level-driven rounds -> this).
 drop function if exists strike_enemy(text);
 
 create or replace function strike_enemy(p_enemy_key text default 'test_rat')
 returns table (
+  rounds_fought int,
   damage_dealt int,
-  enemy_defeated boolean,
+  kills int,
   enemy_hp int,
   enemy_max_hp int,
+  enemy_name text,
   player_hp int,
   player_max_hp int,
   xp_gained int,
@@ -530,80 +634,113 @@ set search_path = public
 as $$
 declare
   p profiles%rowtype;
-  e enemies%rowtype;
   pc player_combat%rowtype;
-  dmg int;
-  defeated boolean := false;
-  gained_xp int := 0;
-  gained_gold int := 0;
+  stats record;
   cooldown interval := interval '1 second'; -- TUNE: just enough to stop double-fires
-  action_cost int := 1; -- TUNE: actions spent per strike — one per idle-tick auto-strike
-  new_player_hp int;
-  new_enemy_hp int;
-  new_actions int;
+  action_cost int := 1;       -- flat per fight-tick, regardless of how many rounds it takes
+  base_rounds int := 10;      -- TUNE: rounds resolved at attack_speed = 1.0 (the default)
+  max_rounds_cap int := 100;  -- hard ceiling so one call can't run unbounded work
+  rounds_to_run int;
+  rounds_run int := 0;
+  hit_dmg int;
+  cur_enemy_hp int;
+  cur_enemy_max_hp int;
+  cur_tier text;
+  cur_enemy_name text;
+  cur_player_hp int;
+  cur_actions int;
+  total_damage int := 0;
+  total_kills int := 0;
+  total_xp int := 0;
+  total_gold int := 0;
 begin
   select * into p from profiles where id = auth.uid() for update;
   if not found then raise exception 'no profile'; end if;
 
-  select * into e from enemies where key = p_enemy_key;
-  if not found then raise exception 'no such enemy'; end if;
+  if not exists (select 1 from enemies where key = p_enemy_key) then
+    raise exception 'no such enemy';
+  end if;
 
-  pc := get_or_spawn_player_enemy(p_enemy_key);
+  perform get_or_spawn_player_enemy(p_enemy_key); -- ensures a fight (and tier) exists
+  select * into pc from player_combat where profile_id = auth.uid();
+  select * into stats from enemy_effective_stats(pc.enemy_key, pc.enemy_tier);
 
   -- this now fires automatically every idle tick (unattended), so both the
   -- "out of actions" and "on cooldown" cases return a quiet no-op row
   -- instead of raising — an exception every 8s would just spam the client.
   if p.actions < action_cost then
-    return query select 0, false, pc.enemy_hp, e.max_hp, p.hp, p.max_hp, 0, 0, p.actions, true;
+    return query select 0, 0, 0, pc.enemy_hp, stats.eff_max_hp, stats.display_name, p.hp, p.max_hp, 0, 0, p.actions, true;
     return;
   end if;
 
   if pc.last_strike_at is not null and pc.last_strike_at + cooldown > now() then
-    return query select 0, false, pc.enemy_hp, e.max_hp, p.hp, p.max_hp, 0, 0, p.actions, false;
+    return query select 0, 0, 0, pc.enemy_hp, stats.eff_max_hp, stats.display_name, p.hp, p.max_hp, 0, 0, p.actions, false;
     return;
   end if;
 
-  dmg := greatest(1, p.attack);
-  new_enemy_hp := greatest(0, pc.enemy_hp - dmg);
+  rounds_to_run := least(max_rounds_cap, greatest(1, round(base_rounds * p.attack_speed)::int));
 
-  if new_enemy_hp <= 0 then
-    defeated := true;
-    gained_xp := e.xp_reward;
-    gained_gold := e.gold_reward;
-  end if;
+  cur_tier := pc.enemy_tier;
+  cur_enemy_hp := pc.enemy_hp;
+  cur_enemy_max_hp := stats.eff_max_hp;
+  cur_enemy_name := stats.display_name;
+  cur_player_hp := p.hp;
+  cur_actions := p.actions - action_cost; -- spent once, up front, no matter how the fight goes
 
-  new_player_hp := p.hp;
-  if defeated then
-    new_player_hp := p.max_hp; -- full heal: a new fight (the respawned enemy) starts fresh
-  else
-    new_player_hp := greatest(0, p.hp - e.attack);
-    if new_player_hp <= 0 then
-      new_player_hp := p.max_hp; -- basic "knocked out, back on your feet" reset — no penalty yet
+  while rounds_run < rounds_to_run loop
+    rounds_run := rounds_run + 1;
+
+    -- player's swing: Power vs. the enemy's (tier-scaled) Defense, with a
+    -- Crit chance to double it
+    hit_dmg := greatest(1, p.attack - stats.eff_defense);
+    if random() < (p.crit / 100.0) then hit_dmg := hit_dmg * 2; end if;
+    cur_enemy_hp := greatest(0, cur_enemy_hp - hit_dmg);
+    total_damage := total_damage + hit_dmg;
+
+    -- Multi Strike: a chance of a second swing landing in the same round
+    if cur_enemy_hp > 0 and random() < (p.multi_strike / 100.0) then
+      hit_dmg := greatest(1, p.attack - stats.eff_defense);
+      if random() < (p.crit / 100.0) then hit_dmg := hit_dmg * 2; end if;
+      cur_enemy_hp := greatest(0, cur_enemy_hp - hit_dmg);
+      total_damage := total_damage + hit_dmg;
     end if;
-  end if;
 
-  new_actions := p.actions - action_cost;
+    if cur_enemy_hp <= 0 then
+      total_kills := total_kills + 1;
+      total_xp := total_xp + stats.eff_xp;
+      total_gold := total_gold + stats.eff_gold;
+      cur_player_hp := p.max_hp; -- full heal: the next enemy starts the round fresh
+
+      -- immediate respawn so the remaining rounds keep fighting — a fresh
+      -- tier roll each time, so a fight can run into more than one
+      -- elite/champion (or none at all)
+      cur_tier := roll_enemy_tier();
+      select * into stats from enemy_effective_stats(p_enemy_key, cur_tier);
+      cur_enemy_hp := stats.eff_max_hp;
+      cur_enemy_max_hp := stats.eff_max_hp;
+      cur_enemy_name := stats.display_name;
+    else
+      -- enemy's counter-swing: its (tier-scaled) Attack vs. the player's Defense
+      cur_player_hp := greatest(0, cur_player_hp - greatest(1, stats.eff_attack - p.defense));
+      if cur_player_hp <= 0 then
+        cur_player_hp := p.max_hp; -- basic "knocked out, back on your feet" reset — no penalty yet
+      end if;
+    end if;
+  end loop;
 
   update profiles
-    set hp = new_player_hp,
-        xp = xp + gained_xp,
-        gold = gold + gained_gold,
-        actions = new_actions
+    set hp = cur_player_hp,
+        xp = xp + total_xp,
+        gold = gold + total_gold,
+        actions = cur_actions
     where id = p.id;
 
-  if defeated then
-    -- immediate respawn so there's always something to test against
-    update player_combat
-      set enemy_hp = e.max_hp, updated_at = now(), last_strike_at = now()
-      where profile_id = auth.uid();
-    new_enemy_hp := e.max_hp;
-  else
-    update player_combat
-      set enemy_hp = new_enemy_hp, updated_at = now(), last_strike_at = now()
-      where profile_id = auth.uid();
-  end if;
+  update player_combat
+    set enemy_hp = cur_enemy_hp, enemy_tier = cur_tier, updated_at = now(), last_strike_at = now()
+    where profile_id = auth.uid();
 
-  return query select dmg, defeated, new_enemy_hp, e.max_hp, new_player_hp, p.max_hp, gained_xp, gained_gold, new_actions, false;
+  return query select rounds_run, total_damage, total_kills, cur_enemy_hp, cur_enemy_max_hp, cur_enemy_name,
+    cur_player_hp, p.max_hp, total_xp, total_gold, cur_actions, false;
 end;
 $$;
 
@@ -1346,6 +1483,6 @@ on conflict (key) do nothing;
 
 -- a weak, always-available test enemy so the Current Battle panel has
 -- something to fight before real mob content exists
-insert into enemies (key, name, max_hp, attack, xp_reward, gold_reward) values
-  ('test_rat', 'Test Rat', 20, 2, 5, 2)
+insert into enemies (key, name, max_hp, attack, defense, xp_reward, gold_reward) values
+  ('test_rat', 'Test Rat', 20, 2, 0, 5, 2)
 on conflict (key) do nothing;
