@@ -264,12 +264,17 @@ create table if not exists inventory (
   primary key (profile_id, item_id)
 );
 
--- solo enemies: a small standalone catalog for testing the combat panel
+-- solo enemies: the mob catalog for the single ongoing "Current Battle"
 -- (separate from guild_bosses, which are per-guild and idle-fed). A player
 -- fights a PACK of 1-30 of these at once (see player_combat.pack and
 -- strike_enemy below); this table still defines one enemy TYPE's base
 -- stats, which get multiplied up per-spawn (tier, banishment bracket,
 -- 0.85-1.25 spawn variance) rather than needing a row per difficulty.
+-- roll_pack() picks WHICH enemy fills each pack slot at random (gated by
+-- min_depth -- see below), so there's no enemy-select UI and no separate
+-- "zones" to progress through: it's one continuous fight that both gets
+-- harder (via the existing depth/tier/variance scaling) and pulls from a
+-- wider mob roster as the player's Banishment depth grows.
 create table if not exists enemies (
   key          text primary key,
   name         text not null,
@@ -278,10 +283,17 @@ create table if not exists enemies (
   defense      int not null default 0,  -- mitigates the player's damage per swing (see strike_enemy)
   xp_reward    int not null default 0,
   gold_reward  int not null default 0,
-  speed        int not null default 1  -- decides pack-vs-player initiative each round, see strike_enemy
+  speed        int not null default 1,  -- decides pack-vs-player initiative each round, see strike_enemy
+  min_depth    int not null default 0  -- lowest profiles.depth (Banishment count) this can spawn at, see roll_pack
 );
 alter table enemies add column if not exists defense int not null default 0;
 alter table enemies add column if not exists speed int not null default 1;
+-- Pure content-gating, not a power lever -- base stats across the roster
+-- sit in the same rough band on purpose (see the seed data's comment
+-- below), so min_depth only ever decides WHICH mobs can turn up, never how
+-- hard the fight actually is. Difficulty is entirely tier/depth_mult/
+-- variance (enemy_effective_stats), same as always.
+alter table enemies add column if not exists min_depth int not null default 0;
 -- "level" (added for the previous rounds-scale-with-enemy-level design,
 -- since superseded by attack_speed-driven round counts + elite/champion
 -- tiers below) never shipped past one iteration — drop it if a project ran
@@ -322,6 +334,14 @@ alter table player_combat add column if not exists affix_keys jsonb not null def
 alter table player_combat add column if not exists debuff_keys jsonb not null default '[]'::jsonb;
 alter table player_combat add column if not exists bracket_used int not null default 0;
 alter table player_combat add column if not exists enemy_key_used text;
+-- Obsolete now that roll_pack() picks a random enemy PER PACK MEMBER
+-- instead of one enemy for the whole pack (see get_or_spawn_pack()) --
+-- "which single enemy is this pack" stopped being a meaningful question,
+-- and each member's own 'enemy_key' inside the pack jsonb array already
+-- carries this info per-member anyway. Dropped, not just abandoned, since
+-- nothing reads it anymore (a project that never had this column is a
+-- no-op here).
+alter table player_combat drop column if exists enemy_key_used;
 
 -- "Daily Totals" (see bump_daily_stats() below): unlike the old client-only
 -- session totals (which reset on every page reload and were never visible
@@ -1229,7 +1249,13 @@ $$;
 -- Rolls a fresh pack of p_size enemies (tier + bracket + the 0.85-1.25x
 -- per-spawn power variance) — hp_pct affix scaling is applied afterward by
 -- the caller via apply_hp_mod, not here, so this stays affix-agnostic.
-create or replace function roll_pack(p_enemy_key text, p_size int, p_bracket int)
+-- Postgres can't CREATE OR REPLACE a function onto a different parameter
+-- list -- a project that already ran an earlier version of this file needs
+-- the old 3-arg (enemy_key, size, bracket) signature dropped first. Safe
+-- no-op on a project that's never defined it.
+drop function if exists roll_pack(text, int, int);
+
+create or replace function roll_pack(p_size int, p_bracket int)
 returns jsonb
 language plpgsql
 as $$
@@ -1239,13 +1265,29 @@ declare
   tier text;
   variance numeric;
   stats record;
+  member_enemy_key text;
 begin
   for i in 1..greatest(1, p_size) loop
+    -- A fresh, independent roll PER PACK MEMBER, not once for the whole
+    -- pack -- this is what makes a single fight mix species instead of
+    -- always spawning a uniform pack of one kind. min_depth gates which
+    -- enemies are even eligible at the player's current Banishment depth;
+    -- among those, every eligible enemy is equally likely (no rarity
+    -- weighting yet -- TUNE if some should feel rarer than others later).
+    select key into member_enemy_key from enemies
+      where min_depth <= p_bracket order by random() limit 1;
+    -- Defensive fallback: should never actually fire (test_rat's min_depth
+    -- 0 row always qualifies), but guarantees this can never come back null
+    -- if the enemies table is ever misconfigured mid-tune.
+    if member_enemy_key is null then
+      member_enemy_key := 'test_rat';
+    end if;
+
     tier := roll_enemy_tier();
     variance := 0.85 + random() * 0.40; -- TUNE: spawn power range
-    select * into stats from enemy_effective_stats(p_enemy_key, tier, p_bracket, variance);
+    select * into stats from enemy_effective_stats(member_enemy_key, tier, p_bracket, variance);
     result := result || jsonb_build_array(jsonb_build_object(
-      'enemy_key', p_enemy_key,
+      'enemy_key', member_enemy_key,
       'name', stats.display_name,
       'tier', tier,
       'hp', stats.eff_max_hp,
@@ -1357,7 +1399,19 @@ drop function if exists get_or_spawn_player_enemy(text);
 -- avoid an unnecessary migration, but it's purely informational now
 -- (enemy_effective_stats reads depth fresh off profiles every time it's
 -- actually needed, not from this snapshot).
-create or replace function get_or_spawn_pack(p_enemy_key text default 'test_rat')
+--
+-- No longer takes an enemy key: there's exactly one ongoing fight, and
+-- WHICH mobs turn up in it is now rolled per pack member inside roll_pack()
+-- itself (see there) rather than chosen by the caller, so a "the player
+-- switched enemies" reason to respawn no longer exists -- the respawn guard
+-- below is back down to just "no pack yet, or it's fully cleared."
+--
+-- Postgres can't CREATE OR REPLACE a function onto a different parameter
+-- list -- a project that already ran the old 1-arg (p_enemy_key) version
+-- needs it dropped first. Safe no-op on a project that's never defined it.
+drop function if exists get_or_spawn_pack(text);
+
+create or replace function get_or_spawn_pack()
 returns table (
   pack jsonb,
   affix_keys jsonb,
@@ -1378,16 +1432,12 @@ declare
   new_debuff_keys jsonb;
   hp_pct numeric;
 begin
-  if not exists (select 1 from enemies where key = p_enemy_key) then
-    raise exception 'no such enemy';
-  end if;
-
   select * into p from profiles where id = auth.uid();
   if not found then raise exception 'no profile'; end if;
 
   select * into pc from player_combat where profile_id = auth.uid();
 
-  if not found or coalesce(pc.enemy_key_used, '') <> p_enemy_key
+  if not found
      or not exists (select 1 from jsonb_array_elements(pc.pack) e where (e->>'hp')::int > 0)
   then
     select coalesce(jsonb_agg(key), '[]'::jsonb) into new_affix_keys
@@ -1398,12 +1448,11 @@ begin
     select coalesce(sum(mod_val(mods, 'hp_pct')), 0) into hp_pct
       from affix_defs where key in (select jsonb_array_elements_text(new_affix_keys));
 
-    new_pack := apply_hp_mod(roll_pack(p_enemy_key, p.sel_pack_size, p.depth), hp_pct);
+    new_pack := apply_hp_mod(roll_pack(p.sel_pack_size, p.depth), hp_pct);
 
-    insert into player_combat (profile_id, enemy_key_used, pack, affix_keys, debuff_keys, bracket_used, updated_at)
-      values (auth.uid(), p_enemy_key, new_pack, new_affix_keys, new_debuff_keys, p.depth, now())
+    insert into player_combat (profile_id, pack, affix_keys, debuff_keys, bracket_used, updated_at)
+      values (auth.uid(), new_pack, new_affix_keys, new_debuff_keys, p.depth, now())
     on conflict (profile_id) do update set
-      enemy_key_used = excluded.enemy_key_used,
       pack = excluded.pack,
       affix_keys = excluded.affix_keys,
       debuff_keys = excluded.debuff_keys,
@@ -1489,10 +1538,14 @@ end;
 $$;
 
 -- same reasoning as the drop above this signature has changed more than
--- once now (single-swing -> level-driven rounds -> pack combat).
+-- once now (single-swing -> level-driven rounds -> pack combat -> and now
+-- dropping the enemy-key argument entirely, since which mobs spawn is
+-- rolled server-side per pack member in roll_pack() rather than chosen by
+-- the caller -- the drop below (same "(text)" arg-type signature as the
+-- p_enemy_key version) already covers this transition too).
 drop function if exists strike_enemy(text);
 
-create or replace function strike_enemy(p_enemy_key text default 'test_rat')
+create or replace function strike_enemy()
 returns table (
   rounds_fought int,
   damage_dealt int,
@@ -1592,10 +1645,6 @@ begin
   select * into p from profiles where id = auth.uid() for update;
   if not found then raise exception 'no profile'; end if;
 
-  if not exists (select 1 from enemies where key = p_enemy_key) then
-    raise exception 'no such enemy';
-  end if;
-
   select * into pc from player_combat where profile_id = auth.uid();
 
   -- this fires automatically every idle tick (unattended), so both the
@@ -1619,7 +1668,7 @@ begin
     return;
   end if;
 
-  perform get_or_spawn_pack(p_enemy_key); -- ensures a live pack (and its affixes/debuffs) exists
+  perform get_or_spawn_pack(); -- ensures a live pack (and its affixes/debuffs) exists
   select * into pc from player_combat where profile_id = auth.uid();
   new_affix_keys := pc.affix_keys;
   new_debuff_keys := pc.debuff_keys;
@@ -1725,7 +1774,7 @@ begin
           from (select key from debuff_defs order by random() limit greatest(0, p.sel_debuff_count)) s;
         select coalesce(sum(mod_val(mods, 'hp_pct')), 0) into hp_pct
           from affix_defs where key in (select jsonb_array_elements_text(new_affix_keys));
-        cur_pack := apply_hp_mod(roll_pack(p_enemy_key, p.sel_pack_size, p.depth), hp_pct);
+        cur_pack := apply_hp_mod(roll_pack(p.sel_pack_size, p.depth), hp_pct);
         exit exchanges;
       end if;
     end if;
@@ -1817,7 +1866,7 @@ begin
         from (select key from debuff_defs order by random() limit greatest(0, p.sel_debuff_count)) s;
       select coalesce(sum(mod_val(mods, 'hp_pct')), 0) into hp_pct
         from affix_defs where key in (select jsonb_array_elements_text(new_affix_keys));
-      cur_pack := apply_hp_mod(roll_pack(p_enemy_key, p.sel_pack_size, p.depth), hp_pct);
+      cur_pack := apply_hp_mod(roll_pack(p.sel_pack_size, p.depth), hp_pct);
       exit exchanges;
     end if;
 
@@ -1870,7 +1919,7 @@ begin
           from (select key from debuff_defs order by random() limit greatest(0, p.sel_debuff_count)) s;
         select coalesce(sum(mod_val(mods, 'hp_pct')), 0) into hp_pct
           from affix_defs where key in (select jsonb_array_elements_text(new_affix_keys));
-        cur_pack := apply_hp_mod(roll_pack(p_enemy_key, p.sel_pack_size, p.depth), hp_pct);
+        cur_pack := apply_hp_mod(roll_pack(p.sel_pack_size, p.depth), hp_pct);
         exit exchanges;
       end if;
     end if;
@@ -2674,11 +2723,33 @@ insert into items (key, name, description, rarity, item_type, base_value) values
   ('echo_charm',    'Echo Charm',                    'Hums with a voice that isn''t yours.', 'rare', 'trinket', 50)
 on conflict (key) do nothing;
 
--- a weak, always-available test enemy so the Current Battle panel has
--- something to fight before real mob content exists
-insert into enemies (key, name, max_hp, attack, defense, xp_reward, gold_reward, speed) values
-  ('test_rat', 'Test Rat', 20, 2, 0, 5, 2, 1)
-on conflict (key) do nothing;
+-- The mob roster the "Current Battle" panel draws from. Real content now
+-- (replacing the single always-on test enemy this used to be) -- roll_pack()
+-- picks a random eligible row PER PACK MEMBER (see there), not one enemy
+-- for the whole pack, so even a single fight mixes species. Base stats are
+-- deliberately kept in the same rough band across the whole roster --
+-- min_depth is a variety/flavor gate (what CAN show up), never a power
+-- gate (how hard it hits); all real difficulty still comes from tier +
+-- depth_mult + spawn variance in enemy_effective_stats(), uniformly, no
+-- matter which key got picked. 'test_rat' keeps its original key (existing
+-- player_combat rows/history reference it by key inside pack jsonb, not a
+-- live FK, but no reason to break it) even though the display name moved
+-- on from the dev-placeholder "Test Rat". "on conflict do update" so
+-- re-running this file after a numbers/roster tweak actually applies it.
+insert into enemies (key, name, max_hp, attack, defense, xp_reward, gold_reward, speed, min_depth) values
+  ('test_rat',         'Abyssal Rat',      20, 2, 0, 5, 2, 1, 0),
+  ('rift_skitterling', 'Rift Skitterling', 10, 2, 0, 4, 2, 3, 0),
+  ('gloomfen_leech',   'Gloomfen Leech',   14, 4, 0, 6, 3, 1, 0),
+  ('void_moth',        'Void Moth',        16, 2, 0, 6, 3, 3, 1),
+  ('marrow_hound',     'Marrow Hound',     22, 3, 1, 7, 3, 2, 2),
+  ('ironshell_grub',   'Ironshell Grub',   34, 1, 3, 6, 2, 1, 2),
+  ('whispering_husk',  'Whispering Husk',  28, 2, 2, 7, 3, 1, 4),
+  ('umbral_wraith',    'Umbral Wraith',    26, 3, 2, 8, 4, 2, 6)
+on conflict (key) do update set
+  name = excluded.name, max_hp = excluded.max_hp, attack = excluded.attack,
+  defense = excluded.defense, xp_reward = excluded.xp_reward,
+  gold_reward = excluded.gold_reward, speed = excluded.speed,
+  min_depth = excluded.min_depth;
 
 -- v1-v2 affix/debuff content. All pure stat-mod bundles (see
 -- compute_damage's key vocabulary) so adding more later, or moving these to

@@ -760,10 +760,13 @@ async function applyEncounterSettings() {
 // its own row with a name, hp bar, and a placeholder art slot.
 // ---------------------------------------------------------------------------
 
-const TEST_ENEMY_KEY = "test_rat";
-
+// No enemy key here anymore -- get_or_spawn_pack()/strike_enemy() dropped
+// their p_enemy_key argument server-side (see schema.sql) since WHICH mobs
+// fill the pack is now rolled per pack member inside roll_pack() itself,
+// not chosen by the caller. There's exactly one ongoing fight; the roster
+// it draws from just grows with the player's Banishment depth.
 async function loadPack() {
-  const { data, error } = await sb.rpc("get_or_spawn_pack", { p_enemy_key: TEST_ENEMY_KEY });
+  const { data, error } = await sb.rpc("get_or_spawn_pack");
   if (error) return console.error(error);
   const row = Array.isArray(data) ? data[0] : data; // single-row RPC shape varies by PostgREST version
   state.pack = Array.isArray(row.pack) ? row.pack : [];
@@ -928,7 +931,7 @@ function renderDailyTotals() {
 // Totals" state for this tick (see applyDailyTotals). message/row are both
 // null on an error or a missing response row.
 async function autoStrikeEnemy() {
-  const { data, error } = await sb.rpc("strike_enemy", { p_enemy_key: TEST_ENEMY_KEY });
+  const { data, error } = await sb.rpc("strike_enemy");
   if (error) {
     console.error(error);
     return { message: null, row: null };
