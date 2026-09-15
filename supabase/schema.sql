@@ -145,6 +145,32 @@ alter table profiles add column if not exists sel_affix_count int not null defau
 alter table profiles add column if not exists sel_debuff_count int not null default 0 check (sel_debuff_count between 0 and 4);
 alter table profiles add column if not exists sel_banishment_bracket int not null default 0 check (sel_banishment_bracket >= 0);
 
+-- The inline checks just above only ever apply on a fresh deploy (the
+-- column already existing makes "add column if not exists" a no-op, checks
+-- included) -- on a project that's been running a while, the OLD 1-5/0-5/
+-- 0-4 bounds silently stay in force at the table level forever unless
+-- explicitly replaced here, no matter what set_encounter_settings()'s own
+-- validation says. That's exactly what happened this round: pack size's
+-- real cap moved to 30 (see set_encounter_settings), and affix/debuff
+-- counts have validated dynamically against however big affix_defs/
+-- debuff_defs actually are since the dropdowns-to-number-inputs change --
+-- but the table itself was still silently capping every one of these at
+-- their ORIGINAL launch-day catalog size (5 affixes, 4 debuffs) the whole
+-- time, just invisibly, because the catalog hadn't grown past that yet to
+-- expose it. Now that it has (11 affixes, 9 debuffs), the stale constraint
+-- would reject a perfectly legal value the RPC just approved. Pack size
+-- keeps a real table-level ceiling (it's a fixed design cap, not
+-- catalog-driven — see set_encounter_settings' comment on why 30, not
+-- unbounded); affix/debuff counts drop their upper bound entirely at the
+-- table level since only set_encounter_settings' live catalog count can
+-- ever know the real one.
+alter table profiles drop constraint if exists profiles_sel_pack_size_check;
+alter table profiles add constraint profiles_sel_pack_size_check check (sel_pack_size between 1 and 30);
+alter table profiles drop constraint if exists profiles_sel_affix_count_check;
+alter table profiles add constraint profiles_sel_affix_count_check check (sel_affix_count >= 0);
+alter table profiles drop constraint if exists profiles_sel_debuff_count_check;
+alter table profiles add constraint profiles_sel_debuff_count_check check (sel_debuff_count >= 0);
+
 create table if not exists guilds (
   id          uuid primary key default gen_random_uuid(),
   name        text not null unique check (char_length(name) between 3 and 30),
@@ -227,7 +253,7 @@ create table if not exists inventory (
 
 -- solo enemies: a small standalone catalog for testing the combat panel
 -- (separate from guild_bosses, which are per-guild and idle-fed). A player
--- fights a PACK of 1-5 of these at once (see player_combat.pack and
+-- fights a PACK of 1-30 of these at once (see player_combat.pack and
 -- strike_enemy below); this table still defines one enemy TYPE's base
 -- stats, which get multiplied up per-spawn (tier, banishment bracket,
 -- 0.85-1.25 spawn variance) rather than needing a row per difficulty.
@@ -248,7 +274,7 @@ alter table enemies add column if not exists defense int not null default 0;
 alter table enemies drop column if exists level;
 
 -- One row per player: the pack they're currently fighting. "pack" is a
--- jsonb array of 1-5 enemy-state objects (see roll_pack()):
+-- jsonb array of 1-30 enemy-state objects (see roll_pack()):
 --   [{ "enemy_key", "name", "tier", "hp", "max_hp", "attack", "defense",
 --      "xp", "gold" }, ...]
 -- affix_keys/debuff_keys are the specific affixes/debuffs rolled for THIS
@@ -782,7 +808,7 @@ $$;
 
 -- ----------------------------------------------------------------------------
 -- 4c. Pack combat
---    The player fights a PACK of 1-5 enemies at once (player-selected via
+--    The player fights a PACK of 1-30 enemies at once (player-selected via
 --    the difficulty-bracket dropdowns / set_encounter_settings), tracked in
 --    player_combat.pack. get_or_spawn_pack() creates/respawns the pack;
 --    strike_enemy() is called automatically once per client idle-tick
@@ -838,7 +864,7 @@ $$;
 --    heals the player and respawns a fresh pack (same selections), same as
 --    before, but grants nothing.
 --
---    Every individual pack (one player vs. 1-5 spawned enemies) always
+--    Every individual pack (one player vs. 1-30 spawned enemies) always
 --    runs to a real conclusion — a clear or a player death — rather than
 --    being cut off partway through by the tick's round budget. That budget
 --    decides how many NEW packs get started this tick, but once a pack is
@@ -1193,8 +1219,14 @@ begin
   select count(*) into max_affix_count from affix_defs;
   select count(*) into max_debuff_count from debuff_defs;
 
-  if p_pack_size not between 1 and 5 then
-    raise exception 'pack size must be between 1 and 5';
+  -- Raised from the original 1-5 cap, but deliberately NOT fully uncapped
+  -- like affix/debuff/bracket above: pack size drives a real per-enemy cost
+  -- on both ends (roll_pack()'s loop does a DB lookup per member, and the
+  -- client renders one card per member), so an unbounded value here is a
+  -- genuine performance/DoS risk in a way those three never were. 30 is
+  -- comfortably above anything a real fight needs while staying cheap.
+  if p_pack_size not between 1 and 30 then
+    raise exception 'pack size must be between 1 and 30';
   end if;
   if p_affix_count not between 0 and max_affix_count then
     raise exception 'affix count must be between 0 and %', max_affix_count;
@@ -2252,25 +2284,95 @@ insert into enemies (key, name, max_hp, attack, defense, xp_reward, gold_reward)
   ('test_rat', 'Test Rat', 20, 2, 0, 5, 2)
 on conflict (key) do nothing;
 
--- v1 affix/debuff content — a small starter pool so the difficulty-bracket
--- dropdowns are functional end to end. All pure stat-mod bundles (see
+-- v1-v2 affix/debuff content. All pure stat-mod bundles (see
 -- compute_damage's key vocabulary) so adding more later, or moving these to
 -- gear, never requires touching the combat loop itself — just another row.
 -- "on conflict do update" so re-running this file after a numbers tweak
 -- here actually applies it, rather than being silently skipped forever.
+--
+-- Affixes are enemy-side only (folded into enemy_mods, read as p_atk_mods
+-- when an enemy hits the player and as p_def_mods when the player hits an
+-- enemy — see strike_enemy()), so they're restricted to the keys
+-- compute_damage()/apply_hp_mod() actually read: attack_pct, attack_flat,
+-- damage_pct, damage_reduction_pct, defense_pct, crit_chance_flat, hp_pct.
+-- multi_strike_flat/attack_speed_pct are deliberately never used on an
+-- affix — strike_enemy() only ever reads those two out of player_mods (see
+-- the class-bonus comment below), so on an affix they'd silently do
+-- nothing. Values below are tuned against the current early-game baseline
+-- (profiles default: attack 8, defense 6, max_hp 30; test_rat base: attack
+-- 2, defense 0, max_hp 20) scaled by tier (normal/elite/champion =
+-- 1.0/1.25/1.5x) and the chosen Banishment bracket (sqrt ramp) — see
+-- enemy_effective_stats(). Single-stat affixes sit at roughly the same
+-- weight as the original five; the newer ones layer two smaller stats
+-- together instead of one big one, so stacking several affixes at once
+-- still feels distinct rather than just "everything +30%" five times over.
 insert into affix_defs (key, name, description, mods) values
-  ('enraged',   'Enraged',   'Enemies hit significantly harder.',       '{"attack_pct": 30}'::jsonb),
-  ('fortified', 'Fortified', 'Enemies mitigate much more damage.',      '{"defense_pct": 35}'::jsonb),
-  ('vicious',   'Vicious',   'Enemies deal extra damage on every hit.', '{"damage_pct": 25}'::jsonb),
-  ('resilient', 'Resilient', 'Enemies have much more health.',          '{"hp_pct": 50}'::jsonb),
-  ('deadly',    'Deadly',    'Enemies have a real chance to crit.',     '{"crit_chance_flat": 20}'::jsonb)
+  ('enraged',        'Enraged',         'Enemies hit significantly harder.',
+    '{"attack_pct": 30}'::jsonb),
+  ('fortified',       'Fortified',       'Enemies mitigate much more damage.',
+    '{"defense_pct": 35}'::jsonb),
+  ('vicious',         'Vicious',         'Enemies deal extra damage on every hit.',
+    '{"damage_pct": 25}'::jsonb),
+  ('resilient',       'Resilient',       'Enemies have much more health.',
+    '{"hp_pct": 50}'::jsonb),
+  ('deadly',          'Deadly',          'Enemies have a real chance to crit.',
+    '{"crit_chance_flat": 20}'::jsonb),
+  -- Voidscarred is a flat (not %) attack bump — its own weapon carries a
+  -- fixed extra bite regardless of the enemy's scaled attack, so it matters
+  -- most at low brackets/tiers and fades toward irrelevant at very high
+  -- ones, unlike every %-based affix here which stays proportionally
+  -- meaningful forever. Against a fresh player's base defense 6, +3 flat on
+  -- a tier-1 test_rat (eff_attack 2) roughly triples its bite.
+  ('voidscarred',     'Voidscarred',     'Enemies'' weapons are void-forged, adding a small flat bite to every hit.',
+    '{"attack_flat": 3}'::jsonb),
+  -- damage_reduction_pct on the enemy side is read as p_def_mods when the
+  -- PLAYER attacks, so this cuts into the player's own outgoing damage —
+  -- the enemy-side mirror of Fortified's defense_pct, but via the
+  -- multiplicative damage_pct/damage_reduction_pct term instead of the
+  -- mitigation ratio, so it stacks distinctly with Fortified rather than
+  -- just being a second copy of it.
+  ('blackened_hide',  'Blackened Hide',  'Enemies shrug off a portion of all damage taken.',
+    '{"damage_reduction_pct": 20}'::jsonb),
+  ('ravenous',         'Ravenous',        'Enemies crit more often and hit harder when they do.',
+    '{"crit_chance_flat": 15, "damage_pct": 10}'::jsonb),
+  ('hollow_carapace',  'Hollow Carapace', 'Enemies are tougher and far harder to put down.',
+    '{"defense_pct": 25, "hp_pct": 20}'::jsonb),
+  ('voidtouched',      'Voidtouched',     'Enemies strike harder and crit more often.',
+    '{"attack_pct": 20, "crit_chance_flat": 10}'::jsonb),
+  ('maw_of_the_deep',  'Maw of the Deep', 'Enemies have enormous health and a small extra bite.',
+    '{"hp_pct": 75, "attack_flat": 4}'::jsonb)
 on conflict (key) do update set name = excluded.name, description = excluded.description, mods = excluded.mods;
 
+-- Debuffs are player-side (folded into player_mods, alongside the class
+-- bonus), so — unlike affixes — they CAN use multi_strike_flat and
+-- attack_speed_pct, since strike_enemy() reads both of those straight out
+-- of player_mods (see the class-bonus comment below). Magnitudes are kept
+-- in the same range as the original four (roughly -10 to -25) so no single
+-- new debuff swings a fight harder than picking one of the originals would.
 insert into debuff_defs (key, name, description, mods) values
-  ('weakened', 'Weakened', 'Your Power is reduced for this fight.',      '{"attack_pct": -20}'::jsonb),
-  ('exposed',  'Exposed',  'Your Defense is reduced for this fight.',    '{"defense_pct": -25}'::jsonb),
-  ('fragile',  'Fragile',  'Your max HP is reduced for this fight.',     '{"hp_pct": -20}'::jsonb),
-  ('clumsy',   'Clumsy',   'Your Crit chance is reduced for this fight.','{"crit_chance_flat": -10}'::jsonb)
+  ('weakened',        'Weakened',         'Your Power is reduced for this fight.',
+    '{"attack_pct": -20}'::jsonb),
+  ('exposed',         'Exposed',          'Your Defense is reduced for this fight.',
+    '{"defense_pct": -25}'::jsonb),
+  ('fragile',         'Fragile',          'Your max HP is reduced for this fight.',
+    '{"hp_pct": -20}'::jsonb),
+  ('clumsy',          'Clumsy',           'Your Crit chance is reduced for this fight.',
+    '{"crit_chance_flat": -10}'::jsonb),
+  ('voidbound',        'Voidbound',        'Your Multi Strike is reduced for this fight.',
+    '{"multi_strike_flat": -15}'::jsonb),
+  ('chilled_blood',    'Chilled Blood',    'Your Attack Speed is reduced for this fight.',
+    '{"attack_speed_pct": -15}'::jsonb),
+  -- The one debuff that reads damage_reduction_pct as the DEFENDER (the
+  -- player): compute_damage() subtracts p_def_mods.damage_reduction_pct, so
+  -- a NEGATIVE value here increases the multiplier above 1.0 instead of
+  -- reducing it — i.e. this is "take extra damage", the mirror image of
+  -- Blackened Hide above, reusing the same key rather than adding a new one.
+  ('marked_by_the_deep', 'Marked by the Deep', 'You take extra damage for this fight.',
+    '{"damage_reduction_pct": -15}'::jsonb),
+  ('sundered_grip',    'Sundered Grip',    'Your damage dealt is reduced for this fight.',
+    '{"damage_pct": -15}'::jsonb),
+  ('sapped',           'Sapped',           'Your Power and Defense are both reduced for this fight.',
+    '{"attack_pct": -10, "defense_pct": -10}'::jsonb)
 on conflict (key) do update set name = excluded.name, description = excluded.description, mods = excluded.mods;
 
 -- Starting class bonuses. These are permanent, always-active modifier

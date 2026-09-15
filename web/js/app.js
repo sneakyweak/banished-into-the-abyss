@@ -592,7 +592,7 @@ function renderEncounterSettings() {
   const p = state.profile;
   if (!p) return;
   setNumberInput($("sel-affix-count"), 0, state.maxAffixCount, p.sel_affix_count);
-  setNumberInput($("sel-pack-size"), 1, 5, p.sel_pack_size);
+  setNumberInput($("sel-pack-size"), 1, 30, p.sel_pack_size);
   setNumberInput($("sel-debuff-count"), 0, state.maxDebuffCount, p.sel_debuff_count);
   setNumberInput($("sel-banishment-bracket"), 0, p.depth, p.sel_banishment_bracket);
 }
@@ -632,7 +632,7 @@ async function applyEncounterSettings() {
   // to 5 instead of just silently sending a different number than what's
   // on screen. Banishment bracket has no upper bound to clamp to -- only
   // guard against negative.
-  const p_pack_size = clampInt(parseInt($("sel-pack-size").value, 10), 1, 5);
+  const p_pack_size = clampInt(parseInt($("sel-pack-size").value, 10), 1, 30);
   const p_affix_count = clampInt(parseInt($("sel-affix-count").value, 10), 0, state.maxAffixCount);
   const p_debuff_count = clampInt(parseInt($("sel-debuff-count").value, 10), 0, state.maxDebuffCount);
   const p_banishment_bracket = clampInt(parseInt($("sel-banishment-bracket").value, 10), 0, Infinity);
@@ -662,9 +662,9 @@ async function applyEncounterSettings() {
 
 // ---------------------------------------------------------------------------
 // Pack combat (Test Rat) — drives the Current Battle panel's player vs.
-// enemy-pack display independently of guilds. The player fights 1-5
+// enemy-pack display independently of guilds. The player fights 1-30
 // enemies at once (see the encounter-settings dropdowns above); each has
-// its own mini card with a name, hp bar, and a placeholder art slot.
+// its own row with a name, hp bar, and a placeholder art slot.
 // ---------------------------------------------------------------------------
 
 const TEST_ENEMY_KEY = "test_rat";
@@ -680,13 +680,15 @@ async function loadPack() {
   renderActiveModifiers();
 }
 
-// Renders the whole pack side of the arena as one card per member — a name,
-// hp bar, and a placeholder art slot (swap for a real <img> per enemy_key
-// once mob art exists; nothing else here needs to change for that).
-// Built with textContent/DOM nodes rather than innerHTML+template strings
-// since enemy names, while server-controlled today, shouldn't need an
-// escaping audit later just because this function got reused for something
-// less trusted.
+// Renders the whole pack side of the arena as one row per member — a
+// left-hand placeholder art slot (swap for a real <img> per enemy_key once
+// mob art exists) plus a name/hp-bar/hp-text block filling the rest of the
+// row's width. Stacked vertically (see .battle-pack/.pack-member in
+// style.css) instead of the old wrapping grid of narrow columns — reads far
+// more clearly once a pack can run past 5 members. Built with
+// textContent/DOM nodes rather than innerHTML+template strings since enemy
+// names, while server-controlled today, shouldn't need an escaping audit
+// later just because this function got reused for something less trusted.
 function renderPack(pack) {
   const container = $("battle-pack");
   if (!container) return;
@@ -694,7 +696,7 @@ function renderPack(pack) {
   pack.forEach((enemy) => {
     const hp = Math.max(0, enemy.hp);
     const card = document.createElement("div");
-    card.className = "battle-side battle-enemy pack-member" + (hp <= 0 ? " pack-member-dead" : "");
+    card.className = "battle-enemy pack-member" + (hp <= 0 ? " pack-member-dead" : "");
 
     const slot = document.createElement("div");
     slot.className = "battle-mob-slot pack-mob-slot";
@@ -704,19 +706,13 @@ function renderPack(pack) {
     slot.appendChild(icon);
     card.appendChild(slot);
 
+    const info = document.createElement("div");
+    info.className = "pack-member-info";
+
     const name = document.createElement("div");
     name.className = "battle-name";
     name.textContent = enemy.name || "—";
-    card.appendChild(name);
-
-    // Empty but present, same as the player card's "Lv X" line below its
-    // name -- without this the enemy cards are one text row shorter than
-    // the player card, which is what staggers every HP bar out of line
-    // with each other even though the art slot above is already matched.
-    const sub = document.createElement("div");
-    sub.className = "battle-sub";
-    sub.innerHTML = "&nbsp;";
-    card.appendChild(sub);
+    info.appendChild(name);
 
     const hpBar = document.createElement("div");
     hpBar.className = "hp-bar";
@@ -725,13 +721,14 @@ function renderPack(pack) {
     const pct = Math.max(0, Math.min(100, (hp / enemy.max_hp) * 100));
     hpFill.style.width = pct + "%";
     hpBar.appendChild(hpFill);
-    card.appendChild(hpBar);
+    info.appendChild(hpBar);
 
     const hpText = document.createElement("div");
     hpText.className = "battle-hp-text";
     hpText.textContent = `${hp} / ${enemy.max_hp} HP`;
-    card.appendChild(hpText);
+    info.appendChild(hpText);
 
+    card.appendChild(info);
     container.appendChild(card);
   });
 }

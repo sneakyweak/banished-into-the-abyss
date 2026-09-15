@@ -214,9 +214,10 @@
               <div class="hp-bar"><div id="player-hp-fill" class="hp-fill hp-fill-player"></div></div>
               <div id="player-hp-text" class="battle-hp-text"></div>
             </div>
-            <!-- The enemy pack (1-5 members, per the Number of Enemies
-                 Spawned dropdown below) — rendered by app.js's renderPack().
-                 Each member card gets its own placeholder art slot; swap for
+            <!-- The enemy pack (1-30 members, per the Number of Enemies
+                 Spawned dropdown below) — rendered by app.js's renderPack()
+                 as a vertical list of rows so any pack size reads clearly.
+                 Each member row gets its own placeholder art slot; swap for
                  a real <img> per enemy_key once mob art exists. -->
             <div class="battle-pack" id="battle-pack"></div>
           </div>
@@ -245,7 +246,7 @@
             </label>
             <label class="encounter-setting">
               <span>Number of Enemies Spawned</span>
-              <input type="number" id="sel-pack-size" min="1" max="5" step="1" inputmode="numeric" />
+              <input type="number" id="sel-pack-size" min="1" max="30" step="1" inputmode="numeric" />
             </label>
             <label class="encounter-setting">
               <span>Player Debuffs</span>
@@ -439,8 +440,12 @@
        brand-new visitor never sees it — only a browser that previously
        stored a different version. -->
   <script>
-    window.APP_VERSION = "20";
+    window.APP_VERSION = "21";
     window.PATCH_NOTES = [
+      "New affixes and debuffs, Abyssal/Void themed: enemies can now roll Voidscarred, Blackened Hide, Ravenous, Hollow Carapace, Voidtouched, or Maw of the Deep (11 affixes total, up from 5); Player Debuffs gained Voidbound, Chilled Blood, Marked by the Deep, Sundered Grip, and Sapped (9 debuffs total, up from 4).",
+      "Number of Enemies Spawned now goes up to 30 (was capped at 5).",
+      "The enemy pack now renders as a clean vertical list of rows instead of wrapping side-by-side columns -- much easier to read once a pack has more than a couple members.",
+      "Fixed a longstanding bug where Number of Affixes / Player Debuffs could silently reject a value the game itself said was valid, once the affix/debuff catalog grew past its original launch-day size.",
       "Classes now have real starting bonuses instead of being purely cosmetic — Warrior (+5% HP/Defense/Power), Archer (+10% Crit/Power, -5% Defense), Magi (+10% Multi Strike/Crit, +5% Power, -20% Defense), Striker (+20% Multi Strike/Crit, -10% Defense). Shown right on the class-select screen.",
       "You now choose your class again each time you Banish, instead of being stuck with your first pick forever.",
       "New: an optional security question, set at signup, lets you reset your own password later — there's a 'Forgot password?' link on the sign-in screen. No email address is ever needed.",

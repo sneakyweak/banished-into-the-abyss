@@ -532,22 +532,25 @@ button:disabled { opacity: 0.4; cursor: not-allowed; }
 
 /* Battle panel */
 
+/* Player summary stays a centered block on top; the enemy pack renders
+   below it as a vertical list (see .battle-pack) rather than side-by-side
+   columns — reads far more clearly once a pack can run past a handful of
+   members (Number of Enemies Spawned now goes up to 30). */
 .battle-arena {
   display: flex;
-  align-items: flex-start;
-  justify-content: center;
-  flex-wrap: wrap;
-  gap: 20px;
+  flex-direction: column;
+  align-items: center;
+  gap: 16px;
   margin: 0 auto 14px;
-  max-width: 720px;
+  max-width: 640px;
 }
 .battle-side {
   display: flex;
   flex-direction: column;
   align-items: center;
   gap: 4px;
-  flex: 0 1 200px;
-  width: 200px;
+  width: 100%;
+  max-width: 220px;
   min-width: 0;
 }
 .battle-name {
@@ -559,22 +562,39 @@ button:disabled { opacity: 0.4; cursor: not-allowed; }
 }
 .battle-sub { font-size: 0.75rem; color: var(--dim); }
 
-/* The enemy pack: 1-5 member cards, wrapping as needed. Each card is a
-   narrower .battle-side.battle-enemy.pack-member so several fit side by
-   side; a cleared member (hp 0) dims out rather than disappearing, so the
+/* The enemy pack: any number of member rows (1-30), stacked vertically and
+   always full width — icon on the left, name/hp-bar/hp-text filling the
+   rest. A cleared member (hp 0) dims out rather than disappearing, so the
    pack's original size stays visible mid-fight. */
 .battle-pack {
   display: flex;
-  flex-wrap: wrap;
-  gap: 14px;
-  justify-content: center;
-  flex: 1 1 auto;
+  flex-direction: column;
+  gap: 8px;
+  width: 100%;
 }
 .pack-member {
-  flex: 0 0 120px;
-  width: 120px;
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  box-sizing: border-box;
+  padding: 8px 12px;
+  background: #150f1e;
+  border: 1px solid var(--border);
+  border-radius: 8px;
 }
 .pack-member-dead { opacity: 0.35; }
+/* Fills the row next to the art slot; text is left-aligned here since a
+   full-width row (unlike the old narrow column cards) has room for it. */
+.pack-member-info {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.pack-member-info .battle-name { text-align: left; }
 
 /* Placeholder mob-art slot — one per pack member. Swap
    .battle-mob-placeholder-icon for an <img> with object-fit: cover once
@@ -589,6 +609,12 @@ button:disabled { opacity: 0.4; cursor: not-allowed; }
   display: flex;
   align-items: center;
   justify-content: center;
+}
+/* Smaller than the player's slot so a long vertical list of rows stays
+   compact — the player card above still uses the full 64px size. */
+.pack-mob-slot {
+  width: 48px;
+  height: 48px;
 }
 .battle-mob-placeholder-icon {
   font-size: 1.4rem;
@@ -613,7 +639,8 @@ button:disabled { opacity: 0.4; cursor: not-allowed; }
   background: transparent;
   visibility: hidden;
 }
-.battle-side .hp-bar { width: 100%; }
+.battle-side .hp-bar,
+.pack-member-info .hp-bar { width: 100%; }
 .battle-hp-text { font-size: 0.75rem; color: var(--dim); }
 .hp-bar { background: #2a1f36; border-radius: 4px; height: 16px; overflow: hidden; margin: 8px 0 4px; }
 .hp-fill { background: linear-gradient(90deg, var(--danger), #ff8a5b); height: 100%; width: 100%; transition: width 0.3s; }
