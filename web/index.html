@@ -89,6 +89,30 @@
           <div class="avatar-box">
             <img id="avatar-portrait" class="avatar-portrait" src="img/class-warrior-avatar.jpg" alt="" />
           </div>
+          <script>
+            // Avoids a flash of the wrong class portrait on every page load:
+            // the img above needs SOME src for a brand-new visitor, but a
+            // returning player's real class (cached last time app.js's
+            // renderProfile() ran) is applied here immediately, synchronously,
+            // before the browser even paints — rather than waiting on the
+            // Supabase profile fetch to come back over the network. Mirrors
+            // app.js's CLASS_PORTRAITS map; duplicated on purpose since this
+            // has to run before app.js has loaded.
+            (function () {
+              try {
+                var cls = localStorage.getItem("bita_last_class");
+                var srcByClass = {
+                  warrior: "img/class-warrior-avatar.jpg",
+                  archer: "img/class-archer-avatar.jpg",
+                  magi: "img/class-magi-avatar.jpg",
+                  striker: "img/class-striker-avatar.jpg",
+                };
+                if (cls && srcByClass[cls]) {
+                  document.getElementById("avatar-portrait").src = srcByClass[cls];
+                }
+              } catch (e) {}
+            })();
+          </script>
           <h2 id="char-name">—</h2>
           <ul class="stat-list">
             <li><span class="stat-label">Depth</span><span id="stat-depth">0</span></li>
@@ -123,25 +147,47 @@
               <div class="hp-bar"><div id="player-hp-fill" class="hp-fill hp-fill-player"></div></div>
               <div id="player-hp-text" class="battle-hp-text"></div>
             </div>
-            <!-- Placeholder for future per-mob art; swap the icon for an
-                 <img id="battle-mob-art"> once artwork exists per enemy key. -->
-            <div class="battle-mob-slot" id="battle-mob-slot">
-              <span class="battle-mob-placeholder-icon">?</span>
-            </div>
-            <div class="battle-side battle-enemy">
-              <div class="battle-name" id="enemy-name">—</div>
-              <div class="battle-sub">&nbsp;</div>
-              <div class="hp-bar"><div id="enemy-hp-fill" class="hp-fill"></div></div>
-              <div id="enemy-hp-text" class="battle-hp-text"></div>
-            </div>
+            <!-- The enemy pack (1-5 members, per the Number of Enemies
+                 Spawned dropdown below) — rendered by app.js's renderPack().
+                 Each member card gets its own placeholder art slot; swap for
+                 a real <img> per enemy_key once mob art exists. -->
+            <div class="battle-pack" id="battle-pack"></div>
           </div>
+          <!-- Active affixes (enemy-side) / debuffs (player-side, self-imposed)
+               for the current pack — see the dropdowns below. -->
+          <p id="active-modifiers" class="log active-modifiers"></p>
           <p id="tick-log" class="log battle-summary"></p>
-          <!-- Running session totals (damage dealt/taken, kills, deaths, and
-               whatever else gets tracked later — crits, statuses, etc.). -->
+          <!-- Running session totals (damage dealt/taken, kills, deaths, idle
+               income, and whatever else gets tracked later — crits, statuses,
+               etc.). -->
           <p id="battle-stats-summary" class="log battle-stats-summary"></p>
 
           <div class="tick-bar"><div id="tick-bar-fill" class="tick-fill"></div></div>
           <button id="btn-refresh-actions">Refresh Actions (<span id="stat-actions">0</span>)</button>
+
+          <!-- Difficulty-bracket selections: each trades a harder fight for
+               a proportionally bigger reward (see selection_reward_mult in
+               schema.sql). Options are populated by app.js's
+               renderEncounterSettings(); changing any of them respawns a
+               fresh pack under the new settings. -->
+          <div class="encounter-settings">
+            <label class="encounter-setting">
+              <span>Number of Affixes</span>
+              <select id="sel-affix-count"></select>
+            </label>
+            <label class="encounter-setting">
+              <span>Number of Enemies Spawned</span>
+              <select id="sel-pack-size"></select>
+            </label>
+            <label class="encounter-setting">
+              <span>Player Debuffs</span>
+              <select id="sel-debuff-count"></select>
+            </label>
+            <label class="encounter-setting">
+              <span>Number of Banishments</span>
+              <select id="sel-banishment-bracket"></select>
+            </label>
+          </div>
         </section>
 
         <section class="panel chat-panel">
@@ -299,10 +345,13 @@
        brand-new visitor never sees it — only a browser that previously
        stored a different version. -->
   <script>
-    window.APP_VERSION = "10";
+    window.APP_VERSION = "11";
     window.PATCH_NOTES = [
-      "Current Battle now tracks running session totals (damage dealt/taken, kills, deaths) below the summary line.",
-      "Removed the player portrait, VS divider, and enemy icon from Current Battle — replaced with a placeholder art slot for upcoming mob artwork.",
+      "Combat overhaul: you now fight a full pack of enemies at once, each with their own HP bar, instead of one enemy at a time.",
+      "New difficulty controls below Refresh Actions: Number of Affixes, Number of Enemies Spawned, Player Debuffs, and Number of Banishments — pick your own risk/reward mix, including pushing above your own banishment tier for bigger rewards.",
+      "Rebuilt the damage formula so it scales smoothly forever without number bloat, and supports the new affixes (enemy-side) and debuffs (player-side) shown above the battle log.",
+      "Fixed: XP and gold are now only ever granted on a win — idle income and combat results are shown as separate lines so a loss can no longer look like it paid out.",
+      "Fixed: your character portrait no longer flashes the default Warrior art for a moment before switching to your actual class on page load.",
     ];
   </script>
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js"></script>

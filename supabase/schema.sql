@@ -115,6 +115,18 @@ update profiles set crit = 0 where crit = 5;
 update profiles set speed = 1 where speed = 10;
 update profiles set defense = 1 where defense = 5;
 
+-- Difficulty-bracket selections (the dropdowns below Refresh Actions).
+-- These are player preferences, not per-fight state — they persist across
+-- fights and only take effect on the NEXT spawned pack (see
+-- set_encounter_settings / get_or_spawn_pack below). "depth" (above) IS the
+-- player's banishment count; sel_banishment_bracket is which bracket's
+-- difficulty they're currently choosing to fight at, which can be pushed
+-- above their own depth for extra risk/reward.
+alter table profiles add column if not exists sel_pack_size int not null default 1 check (sel_pack_size between 1 and 5);
+alter table profiles add column if not exists sel_affix_count int not null default 0 check (sel_affix_count between 0 and 5);
+alter table profiles add column if not exists sel_debuff_count int not null default 0 check (sel_debuff_count between 0 and 4);
+alter table profiles add column if not exists sel_banishment_bracket int not null default 0 check (sel_banishment_bracket >= 0);
+
 create table if not exists guilds (
   id          uuid primary key default gen_random_uuid(),
   name        text not null unique check (char_length(name) between 3 and 30),
@@ -197,7 +209,10 @@ create table if not exists inventory (
 
 -- solo enemies: a small standalone catalog for testing the combat panel
 -- (separate from guild_bosses, which are per-guild and idle-fed). A player
--- fights one enemy at a time; player_combat tracks that enemy's current hp.
+-- fights a PACK of 1-5 of these at once (see player_combat.pack and
+-- strike_enemy below); this table still defines one enemy TYPE's base
+-- stats, which get multiplied up per-spawn (tier, banishment bracket,
+-- 0.85-1.25 spawn variance) rather than needing a row per difficulty.
 create table if not exists enemies (
   key          text primary key,
   name         text not null,
@@ -214,18 +229,65 @@ alter table enemies add column if not exists defense int not null default 0;
 -- that version of this file.
 alter table enemies drop column if exists level;
 
+-- One row per player: the pack they're currently fighting. "pack" is a
+-- jsonb array of 1-5 enemy-state objects (see roll_pack()):
+--   [{ "enemy_key", "name", "tier", "hp", "max_hp", "attack", "defense",
+--      "xp", "gold" }, ...]
+-- affix_keys/debuff_keys are the specific affixes/debuffs rolled for THIS
+-- pack (snapshotted at spawn time from the player's sel_* choices on
+-- profiles, so they stay fixed for the pack's lifetime even if the player
+-- changes the dropdowns mid-fight — see set_encounter_settings, which
+-- forces a respawn instead of mutating a live pack).
+--
+-- enemy_key/enemy_hp/enemy_tier are the ORIGINAL single-enemy columns from
+-- before pack combat existed. They're kept (nullable now, unused by new
+-- code) rather than dropped, purely so this file never fails re-running
+-- against a database that still has old rows referencing them.
 create table if not exists player_combat (
   profile_id     uuid primary key references profiles(id) on delete cascade,
-  enemy_key      text not null references enemies(key),
-  enemy_hp       int not null,
-  enemy_tier     text not null default 'normal' check (enemy_tier in ('normal', 'elite', 'champion')),
+  enemy_key      text references enemies(key),
+  enemy_hp       int,
+  enemy_tier     text default 'normal' check (enemy_tier in ('normal', 'elite', 'champion')),
   updated_at     timestamptz not null default now(),
   last_strike_at timestamptz -- null until the player's first real strike; kept
                               -- separate from updated_at so spawning/respawning
                               -- an enemy never itself looks like a recent strike
 );
-alter table player_combat add column if not exists enemy_tier text not null default 'normal'
+alter table player_combat add column if not exists enemy_tier text default 'normal'
   check (enemy_tier in ('normal', 'elite', 'champion'));
+alter table player_combat alter column enemy_key drop not null;
+alter table player_combat alter column enemy_hp drop not null;
+alter table player_combat alter column enemy_tier drop not null;
+alter table player_combat add column if not exists pack jsonb not null default '[]'::jsonb;
+alter table player_combat add column if not exists affix_keys jsonb not null default '[]'::jsonb;
+alter table player_combat add column if not exists debuff_keys jsonb not null default '[]'::jsonb;
+alter table player_combat add column if not exists bracket_used int not null default 0;
+alter table player_combat add column if not exists enemy_key_used text;
+
+-- ----------------------------------------------------------------------------
+-- Affixes (enemy-side) and debuffs (player-side): named modifier bundles a
+-- fight can roll on top of base stats. Both share the same modifier key
+-- vocabulary that compute_damage() understands (attack_pct, attack_flat,
+-- defense_pct, damage_pct, damage_reduction_pct, crit_chance_flat, plus
+-- hp_pct applied separately at spawn time since hp isn't part of a single
+-- damage roll) — adding a new one later, or a gear affix down the line, is
+-- just another row with a mods bundle built from that same vocabulary;
+-- nothing about compute_damage or the combat loop has to change for it.
+-- ----------------------------------------------------------------------------
+
+create table if not exists affix_defs (
+  key          text primary key,
+  name         text not null,
+  description  text not null,
+  mods         jsonb not null default '{}'::jsonb
+);
+
+create table if not exists debuff_defs (
+  key          text primary key,
+  name         text not null,
+  description  text not null,
+  mods         jsonb not null default '{}'::jsonb
+);
 
 create table if not exists chat_messages (
   id          bigint generated always as identity primary key,
@@ -352,6 +414,14 @@ create policy "enemy catalog is publicly readable" on enemies for select using (
 drop policy if exists "players see only their own combat state" on player_combat;
 create policy "players see only their own combat state" on player_combat
   for select using (profile_id = auth.uid());
+
+alter table affix_defs enable row level security;
+drop policy if exists "affix catalog is publicly readable" on affix_defs;
+create policy "affix catalog is publicly readable" on affix_defs for select using (true);
+
+alter table debuff_defs enable row level security;
+drop policy if exists "debuff catalog is publicly readable" on debuff_defs;
+create policy "debuff catalog is publicly readable" on debuff_defs for select using (true);
 
 drop policy if exists "global chat is publicly readable" on chat_messages;
 create policy "global chat is publicly readable" on chat_messages
@@ -504,54 +574,71 @@ end;
 $$;
 
 -- ----------------------------------------------------------------------------
--- 4c. Solo enemy combat (test rat)
---    A minimal player-vs-mob loop to drive the Current Battle panel outside
---    of guild bosses: one enemy at a time, tracked in player_combat.
---    get_or_spawn_player_enemy() creates/respawns the fight; strike_enemy()
---    is called automatically once per client idle-tick (every 8s, see
---    app.js doTick()) rather than from a manual button.
+-- 4c. Pack combat
+--    The player fights a PACK of 1-5 enemies at once (player-selected via
+--    the difficulty-bracket dropdowns / set_encounter_settings), tracked in
+--    player_combat.pack. get_or_spawn_pack() creates/respawns the pack;
+--    strike_enemy() is called automatically once per client idle-tick
+--    (every 8s, see app.js doTick()) rather than from a manual button.
 --
 --    Action cost is flat: one fight-tick = 1 action, full stop — however
---    many rounds that fight takes doesn't change the cost. What DOES scale
---    with rounds is how much punishment a single action buys you: each
---    fight resolves a whole round-robin exchange (up to 100 rounds, hard
---    capped so one DB call can't run unbounded work), and how many rounds
---    run is driven by the player's Attack Speed stat — attack_speed 1.0
---    (the default) resolves 10 rounds; a faster attacker gets more swings
---    for the same action. Every round rolls real combat math off the
---    Combat Stats panel: Power vs. the enemy's Defense for base damage,
---    Crit for a double-damage chance, Multi Strike for a chance at a
---    second swing in the same round, and the enemy's (tier-scaled) Attack
---    vs. the player's Defense for the counter-hit. Speed isn't wired into
---    combat yet — noted as a TUNE spot alongside the rest of these numbers
---    once this gets playtested.
+--    many rounds that takes doesn't change the cost. What DOES scale with
+--    rounds is how much punishment a single action buys you: each fight
+--    resolves a whole round-robin exchange (hard capped so one DB call
+--    can't run unbounded work), and how many rounds run is driven by the
+--    player's Attack Speed stat — attack_speed 1.0 (the default) resolves
+--    10 rounds; a faster attacker gets more swings for the same action.
 --
---    Elite/Champion tiers: every time an enemy spawns or respawns
---    (including mid-fight, when a kill immediately queues up the next
---    encounter within the same round-robin) roll_enemy_tier() picks
---    normal/elite/champion at 85%/10%/5%, and enemy_effective_stats()
---    scales that enemy's stats and rewards by 1x/1.25x/1.5x accordingly —
---    tougher, and worth more xp/gold, so drops from a lucky Champion spawn
---    actually feel different. This is entirely separate from
---    perform_idle_tick()'s passive xp/gold, which is time-based and keeps
---    accruing offline regardless of actions — only this auto-strike loop
---    is action-gated (and, per the above, at a flat 1 action regardless of
---    how the fight goes).
+--    DAMAGE FORMULA (see compute_damage() below): attack and defense are
+--    combined via a scale-invariant mitigation ratio — defense/(defense +
+--    attack) — instead of flat subtraction. That ratio only depends on the
+--    two combatants' relative power, never their absolute size, so raw
+--    stats can climb indefinitely (via Banishment retention, gear, and
+--    later prestige systems) without damage ever exploding into absurd
+--    numbers OR collapsing to the 1-damage floor — which is what "scale
+--    slowly forever without number bloat" requires. Modifiers (from
+--    affixes, debuffs, and eventually gear) are named percentage/flat
+--    bundles merged via sum_mods() and read by compute_damage() through a
+--    small fixed vocabulary of keys (attack_pct, attack_flat, defense_pct,
+--    damage_pct, damage_reduction_pct, crit_chance_flat, plus hp_pct
+--    applied separately at spawn) — adding a new affix or gear stat later
+--    is just another row with a mods bundle from that vocabulary; nothing
+--    about the combat loop itself has to change.
 --
---    Every individual battle (one player vs. one spawned enemy) always
---    runs to a real conclusion — someone dies — rather than being cut off
---    partway through by the tick's round budget. That budget (rounds_to_run
---    below, driven by Attack Speed) decides how many NEW battles get
---    started this tick, but once a battle is underway it's always allowed
---    to finish, so the round count can run a little over budget for the
---    last one. A hard, unconditional ceiling (rounds_hard_cap) still
---    bounds the absolute worst case so this function can never hang — in
---    practice, with damage always flooring at 1 and both sides' hp finite,
---    real fights finish long before that ceiling matters. A player "death"
---    (hp hits 0) ends that battle exactly like a kill does — tallied,
---    reported to the client as a real event, and the encounter respawns
---    fresh — but still carries no other penalty (no xp/gold/item loss, full
---    heal after) — a TUNE spot once that becomes a real feature.
+--    DIFFICULTY BRACKETS: enemy power also scales with the player's chosen
+--    Number of Banishments bracket (profiles.sel_banishment_bracket, capped
+--    at their own Depth + 3 — see set_encounter_settings), via a slow sqrt
+--    ramp in enemy_effective_stats() — each further bracket level costs
+--    progressively more relative power, so pushing brackets stays a real
+--    (if increasingly risky) choice forever rather than either trivializing
+--    or outrunning what a patient player can eventually out-level. Number
+--    of Affixes, Number of Enemies Spawned, and Player Debuffs all make the
+--    fight harder in their own way (see strike_enemy) and all feed
+--    selection_reward_mult(), so choosing a harder bracket is rewarded
+--    proportionally to how much harder it actually made the fight — not a
+--    flat bonus. Every enemy spawn additionally rolls its own 0.85-1.25x
+--    power variance (roll_pack), independent of all of the above.
+--
+--    Elite/Champion tiers: every enemy spawn rolls normal/elite/champion at
+--    85%/10%/5% via roll_enemy_tier() on top of all the above scaling —
+--    tougher, and worth more xp/gold, so a lucky Champion spawn actually
+--    feels different. This is entirely separate from perform_idle_tick()'s
+--    passive xp/gold, which is time-based and keeps accruing offline
+--    regardless of actions — only this auto-strike loop is action-gated.
+--
+--    WIN/LOSS: xp and gold are only ever granted when a pack is fully
+--    cleared (event = 'kill') — never on a player death. A death fully
+--    heals the player and respawns a fresh pack (same selections), same as
+--    before, but grants nothing.
+--
+--    Every individual pack (one player vs. 1-5 spawned enemies) always
+--    runs to a real conclusion — a clear or a player death — rather than
+--    being cut off partway through by the tick's round budget. That budget
+--    decides how many NEW packs get started this tick, but once a pack is
+--    underway it's always allowed to finish, so the round count can run a
+--    little over budget for the last one. A hard, unconditional ceiling
+--    (rounds_hard_cap) still bounds the absolute worst case so this
+--    function can never hang.
 -- ----------------------------------------------------------------------------
 
 -- exactly 5% champion, 10% elite, 85% normal — a single random() draw
@@ -574,11 +661,24 @@ begin
 end;
 $$;
 
--- shared by get_or_spawn_player_enemy() and strike_enemy() so the
--- elite/champion multiplier math lives in exactly one place. Not itself
--- exposed as a player action, but callable like any function (it's
--- read-only/stable, so that's harmless).
-create or replace function enemy_effective_stats(p_enemy_key text, p_tier text)
+-- shared by roll_pack() and get_or_spawn_pack() so the tier/bracket/variance
+-- multiplier math lives in exactly one place. Not itself exposed as a
+-- player action, but callable like any function (it's read-only/stable, so
+-- that's harmless).
+--
+-- Postgres can't CREATE OR REPLACE a function onto a different parameter
+-- list — a project that already ran an earlier version of this file needs
+-- the old 2-arg version dropped first, or this fails with "cannot change
+-- name of input parameter" / ambiguity between the two signatures. Safe
+-- no-op on a project that's never defined it.
+drop function if exists enemy_effective_stats(text, text);
+
+create or replace function enemy_effective_stats(
+  p_enemy_key text,
+  p_tier text,
+  p_bracket int default 0,      -- profiles.sel_banishment_bracket at spawn time
+  p_variance numeric default 1.0 -- per-spawn power roll, see roll_pack (0.85-1.25)
+)
 returns table (
   display_name text,
   eff_max_hp int,
@@ -593,97 +693,212 @@ set search_path = public
 as $$
 declare
   e enemies%rowtype;
-  mult numeric;
+  tier_mult numeric;
+  bracket_mult numeric;
+  total_mult numeric;
   prefix text;
 begin
   select * into e from enemies where key = p_enemy_key;
   if not found then raise exception 'no such enemy'; end if;
 
-  mult := case p_tier when 'champion' then 1.5 when 'elite' then 1.25 else 1.0 end; -- TUNE
+  tier_mult := case p_tier when 'champion' then 1.5 when 'elite' then 1.25 else 1.0 end; -- TUNE
+
+  -- Slow, DECELERATING ramp (sqrt, not linear/exponential): each further
+  -- bracket level buys progressively less extra power, so a bracket chosen
+  -- far above the player's own progress is meaningfully harder without
+  -- ever being a sheer wall — see the 4c banner comment above for why this
+  -- shape specifically. TUNE the 0.4 coefficient once playtested.
+  bracket_mult := 1 + sqrt(greatest(0, p_bracket)) * 0.4;
+
+  total_mult := tier_mult * bracket_mult * greatest(0.01, p_variance);
   prefix := case p_tier when 'champion' then 'Champion ' when 'elite' then 'Elite ' else '' end;
 
   return query select
     prefix || e.name,
-    ceil(e.max_hp * mult)::int,
-    ceil(e.attack * mult)::int,
-    ceil(e.defense * mult)::int,
-    ceil(e.xp_reward * mult)::int,
-    ceil(e.gold_reward * mult)::int;
+    greatest(1, ceil(e.max_hp * total_mult))::int,
+    greatest(1, ceil(e.attack * total_mult))::int,
+    greatest(0, ceil(e.defense * total_mult))::int,
+    greatest(0, ceil(e.xp_reward * total_mult))::int,
+    greatest(0, ceil(e.gold_reward * total_mult))::int;
 end;
+$$;
+
+-- ----------------------------------------------------------------------------
+-- Combat math primitives — shared by every damage roll in the game (player
+-- hitting an enemy, an enemy hitting the player), so the formula and the
+-- modifier-stacking rules live in exactly one place. See the 4c banner
+-- comment above for the design rationale.
+-- ----------------------------------------------------------------------------
+
+-- Reads one named value out of a modifier bundle, e.g. mod_val(mods,
+-- 'attack_pct'). default_val (usually 0) is what a bundle that simply
+-- doesn't mention that key resolves to — this is what lets new modifier
+-- keys get added later without touching every existing bundle.
+create or replace function mod_val(mods jsonb, key text, default_val numeric default 0)
+returns numeric
+language sql
+immutable
+as $$
+  select coalesce((mods->>key)::numeric, default_val);
+$$;
+
+-- Merges any number of modifier bundles (e.g. one per active affix or
+-- debuff) into one, summing matching keys — two +15% attack affixes give
+-- +30%, not two separate entries. Takes a jsonb ARRAY of bundle objects,
+-- e.g. '[{"attack_pct":15},{"attack_pct":15,"defense_pct":-10}]'.
+create or replace function sum_mods(bundles jsonb)
+returns jsonb
+language sql
+immutable
+as $$
+  select coalesce(jsonb_object_agg(b.key, b.total), '{}'::jsonb)
+  from (
+    select each.key, sum(each.value::numeric) as total
+    from jsonb_array_elements(coalesce(bundles, '[]'::jsonb)) as bundle
+    cross join lateral jsonb_each_text(bundle) as each(key, value)
+    group by each.key
+  ) b;
+$$;
+
+-- The single damage-roll formula for the whole game. p_atk_mods applies to
+-- the attacker (attack_pct/attack_flat/damage_pct/crit_chance_flat),
+-- p_def_mods to the defender (defense_pct/damage_reduction_pct) — pass
+-- '{}'::jsonb for either side with nothing active.
+--
+-- Mitigation is defense/(defense+attack): a RATIO of the two combatants'
+-- own (modified) stats, not a fixed subtraction or an externally-tuned
+-- constant. That's what makes it scale-invariant — the same formula stays
+-- balanced whether both stats are in the single digits or the millions,
+-- which is the whole trick for "infinite slow scaling without number
+-- bloat". Damage always floors at 1 so a fight can never literally stall.
+create or replace function compute_damage(
+  p_attack numeric,
+  p_crit_chance numeric,    -- base crit %, before crit_chance_flat mods
+  p_defense numeric,
+  p_atk_mods jsonb default '{}'::jsonb,
+  p_def_mods jsonb default '{}'::jsonb
+)
+returns table (dmg int, was_crit boolean)
+language plpgsql
+as $$
+declare
+  eff_attack numeric;
+  eff_defense numeric;
+  mitigation numeric;
+  eff_dmg numeric;
+  crit boolean;
+begin
+  eff_attack := greatest(0,
+    p_attack * (1 + mod_val(p_atk_mods, 'attack_pct') / 100.0) + mod_val(p_atk_mods, 'attack_flat')
+  );
+  eff_defense := greatest(0, p_defense * (1 + mod_val(p_def_mods, 'defense_pct') / 100.0));
+
+  mitigation := coalesce(eff_defense / nullif(eff_defense + eff_attack, 0), 0);
+
+  eff_dmg := eff_attack * (1 - mitigation)
+    * (1 + mod_val(p_atk_mods, 'damage_pct') / 100.0 - mod_val(p_def_mods, 'damage_reduction_pct') / 100.0);
+
+  crit := random() * 100 < greatest(0, p_crit_chance + mod_val(p_atk_mods, 'crit_chance_flat'));
+  if crit then
+    eff_dmg := eff_dmg * 2;
+  end if;
+
+  return query select greatest(1, round(eff_dmg)::int), crit;
+end;
+$$;
+
+-- Applies an hp_pct modifier (from affixes, e.g. "Resilient: +50% enemy hp")
+-- uniformly across every member of a freshly-rolled pack. Kept separate
+-- from roll_pack() so respawning a cleared pack mid-strike_enemy() doesn't
+-- need to re-roll or re-look-up which affixes are active — the caller
+-- already has that mod value on hand.
+create or replace function apply_hp_mod(p_pack jsonb, p_hp_pct numeric)
+returns jsonb
+language sql
+immutable
+as $$
+  select coalesce(jsonb_agg(
+    e || jsonb_build_object(
+      'hp', greatest(1, round((e->>'hp')::numeric * (1 + p_hp_pct / 100.0)))::int,
+      'max_hp', greatest(1, round((e->>'max_hp')::numeric * (1 + p_hp_pct / 100.0)))::int
+    )
+  ), '[]'::jsonb)
+  from jsonb_array_elements(p_pack) e;
+$$;
+
+-- Rolls a fresh pack of p_size enemies (tier + bracket + the 0.85-1.25x
+-- per-spawn power variance) — hp_pct affix scaling is applied afterward by
+-- the caller via apply_hp_mod, not here, so this stays affix-agnostic.
+create or replace function roll_pack(p_enemy_key text, p_size int, p_bracket int)
+returns jsonb
+language plpgsql
+as $$
+declare
+  result jsonb := '[]'::jsonb;
+  i int;
+  tier text;
+  variance numeric;
+  stats record;
+begin
+  for i in 1..greatest(1, p_size) loop
+    tier := roll_enemy_tier();
+    variance := 0.85 + random() * 0.40; -- TUNE: spawn power range
+    select * into stats from enemy_effective_stats(p_enemy_key, tier, p_bracket, variance);
+    result := result || jsonb_build_array(jsonb_build_object(
+      'enemy_key', p_enemy_key,
+      'name', stats.display_name,
+      'tier', tier,
+      'hp', stats.eff_max_hp,
+      'max_hp', stats.eff_max_hp,
+      'attack', stats.eff_attack,
+      'defense', stats.eff_defense,
+      'xp', stats.eff_xp,
+      'gold', stats.eff_gold
+    ));
+  end loop;
+  return result;
+end;
+$$;
+
+-- How much extra a cleared pack is worth for having been made harder via
+-- the selection dropdowns — additive per knob, so the bonus is always
+-- proportional to how much harder that knob actually made the fight
+-- (pack size = more incoming hits per round, affixes = tougher/harder-
+-- hitting enemies, debuffs = a weaker player, bracket = flat-out bigger
+-- enemy stats). TUNE each coefficient once playtested.
+create or replace function selection_reward_mult(p_pack_size int, p_affix_count int, p_debuff_count int, p_bracket int)
+returns numeric
+language sql
+immutable
+as $$
+  select 1
+    + (greatest(0, p_pack_size - 1) * 0.12)
+    + (p_affix_count * 0.15)
+    + (p_debuff_count * 0.20)
+    + (p_bracket * 0.08);
 $$;
 
 -- Postgres can't CREATE OR REPLACE a function onto a different return
 -- signature — a project that already ran an earlier version of this file
--- (before display_name/tier existed below, or before that, player_combat)
--- needs the old one dropped first, or this whole statement fails with
--- "cannot change return type of existing function". Safe no-op on a
--- project that's never defined it.
+-- needs the old one dropped first. Safe no-op on a project that's never
+-- defined it.
 drop function if exists get_or_spawn_player_enemy(text);
 
-create or replace function get_or_spawn_player_enemy(p_enemy_key text default 'test_rat')
+-- (Re)spawns the player's pack if there isn't one yet, or the current one
+-- has been fully cleared already (every member's hp <= 0 — strike_enemy
+-- normally leaves a live pack behind after any clear/death, so in practice
+-- this only really fires for a brand-new player or right after
+-- set_encounter_settings deliberately clears the row). Rolls a fresh set of
+-- affixes/debuffs from the player's current sel_* choices and snapshots
+-- them onto player_combat so they stay fixed for this pack's lifetime.
+create or replace function get_or_spawn_pack(p_enemy_key text default 'test_rat')
 returns table (
-  enemy_key text,
-  display_name text,
-  tier text,
-  enemy_hp int,
-  enemy_max_hp int
-)
-language plpgsql
-security definer
-set search_path = public
-as $$
-declare
-  pc player_combat%rowtype;
-  stats record;
-  new_tier text;
-begin
-  if not exists (select 1 from enemies where key = p_enemy_key) then
-    raise exception 'no such enemy';
-  end if;
-
-  select * into pc from player_combat where profile_id = auth.uid();
-
-  if not found then
-    new_tier := roll_enemy_tier();
-    select * into stats from enemy_effective_stats(p_enemy_key, new_tier);
-    insert into player_combat (profile_id, enemy_key, enemy_hp, enemy_tier)
-      values (auth.uid(), p_enemy_key, stats.eff_max_hp, new_tier)
-      returning * into pc;
-  elsif pc.enemy_key <> p_enemy_key or pc.enemy_hp <= 0 then
-    new_tier := roll_enemy_tier();
-    select * into stats from enemy_effective_stats(p_enemy_key, new_tier);
-    update player_combat
-      set enemy_key = p_enemy_key, enemy_hp = stats.eff_max_hp, enemy_tier = new_tier, updated_at = now()
-      where profile_id = auth.uid()
-      returning * into pc;
-  else
-    select * into stats from enemy_effective_stats(pc.enemy_key, pc.enemy_tier);
-  end if;
-
-  return query select pc.enemy_key, stats.display_name, pc.enemy_tier, pc.enemy_hp, stats.eff_max_hp;
-end;
-$$;
-
--- same reasoning as the drop above this signature has changed more than
--- once now (single-swing -> level-driven rounds -> this).
-drop function if exists strike_enemy(text);
-
-create or replace function strike_enemy(p_enemy_key text default 'test_rat')
-returns table (
-  rounds_fought int,
-  damage_dealt int,
-  kills int,
-  deaths int,
-  enemy_hp int,
-  enemy_max_hp int,
-  enemy_name text,
-  player_hp int,
-  player_max_hp int,
-  xp_gained int,
-  gold_gained int,
-  actions_left int,
-  out_of_actions boolean,
-  rounds_log jsonb
+  pack jsonb,
+  affix_keys jsonb,
+  affix_names jsonb,
+  debuff_keys jsonb,
+  debuff_names jsonb,
+  bracket_used int
 )
 language plpgsql
 security definer
@@ -692,20 +907,141 @@ as $$
 declare
   p profiles%rowtype;
   pc player_combat%rowtype;
-  stats record;
+  new_pack jsonb;
+  new_affix_keys jsonb;
+  new_debuff_keys jsonb;
+  hp_pct numeric;
+begin
+  if not exists (select 1 from enemies where key = p_enemy_key) then
+    raise exception 'no such enemy';
+  end if;
+
+  select * into p from profiles where id = auth.uid();
+  if not found then raise exception 'no profile'; end if;
+
+  select * into pc from player_combat where profile_id = auth.uid();
+
+  if not found or coalesce(pc.enemy_key_used, '') <> p_enemy_key
+     or not exists (select 1 from jsonb_array_elements(pc.pack) e where (e->>'hp')::int > 0)
+  then
+    select coalesce(jsonb_agg(key), '[]'::jsonb) into new_affix_keys
+      from (select key from affix_defs order by random() limit greatest(0, p.sel_affix_count)) s;
+    select coalesce(jsonb_agg(key), '[]'::jsonb) into new_debuff_keys
+      from (select key from debuff_defs order by random() limit greatest(0, p.sel_debuff_count)) s;
+
+    select coalesce(sum(mod_val(mods, 'hp_pct')), 0) into hp_pct
+      from affix_defs where key in (select jsonb_array_elements_text(new_affix_keys));
+
+    new_pack := apply_hp_mod(roll_pack(p_enemy_key, p.sel_pack_size, p.sel_banishment_bracket), hp_pct);
+
+    insert into player_combat (profile_id, enemy_key_used, pack, affix_keys, debuff_keys, bracket_used, updated_at)
+      values (auth.uid(), p_enemy_key, new_pack, new_affix_keys, new_debuff_keys, p.sel_banishment_bracket, now())
+    on conflict (profile_id) do update set
+      enemy_key_used = excluded.enemy_key_used,
+      pack = excluded.pack,
+      affix_keys = excluded.affix_keys,
+      debuff_keys = excluded.debuff_keys,
+      bracket_used = excluded.bracket_used,
+      updated_at = now()
+    returning * into pc;
+  end if;
+
+  return query select
+    pc.pack,
+    pc.affix_keys,
+    (select coalesce(jsonb_agg(name), '[]'::jsonb) from affix_defs where key in (select jsonb_array_elements_text(pc.affix_keys))),
+    pc.debuff_keys,
+    (select coalesce(jsonb_agg(name), '[]'::jsonb) from debuff_defs where key in (select jsonb_array_elements_text(pc.debuff_keys))),
+    pc.bracket_used;
+end;
+$$;
+
+-- Validates and applies the player's difficulty-bracket dropdown choices.
+-- Always clears the in-progress pack so the NEXT strike spawns fresh under
+-- the new settings, rather than a live pack silently drifting out of sync
+-- with what the dropdowns now say (or, worse, a client-supplied bracket
+-- sneaking past the depth+3 cap by never actually respawning).
+create or replace function set_encounter_settings(
+  p_pack_size int,
+  p_affix_count int,
+  p_debuff_count int,
+  p_banishment_bracket int
+)
+returns profiles
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  p profiles%rowtype;
+begin
+  select * into p from profiles where id = auth.uid() for update;
+  if not found then raise exception 'no profile'; end if;
+
+  if p_pack_size not between 1 and 5 then
+    raise exception 'pack size must be between 1 and 5';
+  end if;
+  if p_affix_count not between 0 and 5 then
+    raise exception 'affix count must be between 0 and 5';
+  end if;
+  if p_debuff_count not between 0 and 4 then
+    raise exception 'debuff count must be between 0 and 4';
+  end if;
+  if p_banishment_bracket < 0 or p_banishment_bracket > p.depth + 3 then
+    raise exception 'banishment bracket must be between 0 and % for your current depth', p.depth + 3;
+  end if;
+
+  update profiles set
+    sel_pack_size = p_pack_size,
+    sel_affix_count = p_affix_count,
+    sel_debuff_count = p_debuff_count,
+    sel_banishment_bracket = p_banishment_bracket
+  where id = p.id
+  returning * into p;
+
+  delete from player_combat where profile_id = p.id;
+
+  return p;
+end;
+$$;
+
+-- same reasoning as the drop above this signature has changed more than
+-- once now (single-swing -> level-driven rounds -> pack combat).
+drop function if exists strike_enemy(text);
+
+create or replace function strike_enemy(p_enemy_key text default 'test_rat')
+returns table (
+  rounds_fought int,
+  damage_dealt int,
+  kills int,
+  deaths int,
+  player_hp int,
+  player_max_hp int,
+  xp_gained int,
+  gold_gained int,
+  actions_left int,
+  out_of_actions boolean,
+  rounds_log jsonb,
+  final_pack jsonb,
+  affix_names jsonb,
+  debuff_names jsonb
+)
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  p profiles%rowtype;
+  pc player_combat%rowtype;
   cooldown interval := interval '1 second'; -- TUNE: just enough to stop double-fires
   action_cost int := 1;        -- flat per fight-tick, regardless of how many rounds it takes
-  base_rounds int := 10;       -- TUNE: new-battle budget at attack_speed = 1.0 (the default)
-  rounds_soft_budget int;      -- once crossed, no NEW battle starts — but the current one still finishes
+  base_rounds int := 10;       -- TUNE: new-pack budget at attack_speed = 1.0 (the default)
+  rounds_soft_budget int;      -- once crossed, no NEW pack starts — but the current one still finishes
   rounds_hard_cap int := 25;   -- absolute ceiling across the whole call so this can never hang
   rounds_run int := 0;
-  hit_dmg int;
-  was_crit boolean;
-  cur_enemy_hp int;
-  cur_enemy_max_hp int;
-  cur_tier text;
-  cur_enemy_name text;
+  cur_pack jsonb;
   cur_player_hp int;
+  cur_player_max_hp int;
   cur_actions int;
   total_damage int := 0;
   total_kills int := 0;
@@ -714,15 +1050,24 @@ declare
   total_gold int := 0;
   -- one entry per round actually fought, in order, so the client can play
   -- combat back round-by-round instead of only ever seeing the state after
-  -- everything (including any kill/death respawn) has already resolved —
-  -- that end-state snapshot is what made the hp bars look like they were
-  -- never taking damage. Each entry reflects hp right after that round's
-  -- blows, BEFORE any kill/death respawn resets things for the next battle.
-  -- "hits" carries every individual blow landed THIS round (source,
-  -- damage, crit, multi_strike) so the client can render real combat text
-  -- ("you hit for 5, crit!") instead of just an end-of-fight summary.
+  -- everything (including any clear/death respawn) has already resolved.
+  -- Each entry reflects the whole pack's hp right after that round's
+  -- blows, BEFORE any clear/death respawn resets things for the next pack.
   round_log jsonb := '[]'::jsonb;
   round_hits jsonb;
+  debuff_mod_bundles jsonb;
+  affix_mod_bundles jsonb;
+  player_mods jsonb;   -- merged from active debuffs
+  enemy_mods jsonb;    -- merged from active affixes (applies pack-wide)
+  hp_pct numeric;
+  reward_mult numeric;
+  target_idx int;
+  member jsonb;
+  hit record;
+  i int;
+  any_alive boolean;
+  pack_xp int;
+  pack_gold int;
 begin
   select * into p from profiles where id = auth.uid() for update;
   if not found then raise exception 'no profile'; end if;
@@ -731,35 +1076,48 @@ begin
     raise exception 'no such enemy';
   end if;
 
-  perform get_or_spawn_player_enemy(p_enemy_key); -- ensures a fight (and tier) exists
   select * into pc from player_combat where profile_id = auth.uid();
-  select * into stats from enemy_effective_stats(pc.enemy_key, pc.enemy_tier);
 
-  -- this now fires automatically every idle tick (unattended), so both the
+  -- this fires automatically every idle tick (unattended), so both the
   -- "out of actions" and "on cooldown" cases return a quiet no-op row
   -- instead of raising — an exception every 8s would just spam the client.
   if p.actions < action_cost then
-    return query select 0, 0, 0, 0, pc.enemy_hp, stats.eff_max_hp, stats.display_name, p.hp, p.max_hp, 0, 0, p.actions, true, '[]'::jsonb;
+    return query select 0, 0, 0, 0, p.hp, p.max_hp, 0, 0, p.actions, true,
+      '[]'::jsonb, coalesce(pc.pack, '[]'::jsonb), '[]'::jsonb, '[]'::jsonb;
     return;
   end if;
 
   if pc.last_strike_at is not null and pc.last_strike_at + cooldown > now() then
-    return query select 0, 0, 0, 0, pc.enemy_hp, stats.eff_max_hp, stats.display_name, p.hp, p.max_hp, 0, 0, p.actions, false, '[]'::jsonb;
+    return query select 0, 0, 0, 0, p.hp, p.max_hp, 0, 0, p.actions, false,
+      '[]'::jsonb, coalesce(pc.pack, '[]'::jsonb), '[]'::jsonb, '[]'::jsonb;
     return;
   end if;
 
-  rounds_soft_budget := greatest(1, round(base_rounds * p.attack_speed)::int);
+  perform get_or_spawn_pack(p_enemy_key); -- ensures a live pack (and its affixes/debuffs) exists
+  select * into pc from player_combat where profile_id = auth.uid();
 
-  cur_tier := pc.enemy_tier;
-  cur_enemy_hp := pc.enemy_hp;
-  cur_enemy_max_hp := stats.eff_max_hp;
-  cur_enemy_name := stats.display_name;
-  cur_player_hp := p.hp;
+  select coalesce(jsonb_agg(mods), '[]'::jsonb) into debuff_mod_bundles
+    from debuff_defs where key in (select jsonb_array_elements_text(pc.debuff_keys));
+  select coalesce(jsonb_agg(mods), '[]'::jsonb) into affix_mod_bundles
+    from affix_defs where key in (select jsonb_array_elements_text(pc.affix_keys));
+  player_mods := sum_mods(debuff_mod_bundles);
+  enemy_mods := sum_mods(affix_mod_bundles);
+  hp_pct := mod_val(enemy_mods, 'hp_pct');
+
+  rounds_soft_budget := greatest(1, round(base_rounds * p.attack_speed)::int);
+  reward_mult := selection_reward_mult(p.sel_pack_size, p.sel_affix_count, p.sel_debuff_count, p.sel_banishment_bracket);
+
+  cur_pack := pc.pack;
+  -- a self-imposed hp_pct debuff temporarily lowers the player's effective
+  -- ceiling for THIS fight only — never written back to profiles.max_hp —
+  -- so current hp is clamped down to match if it's currently above that.
+  cur_player_max_hp := greatest(1, round(p.max_hp * (1 + mod_val(player_mods, 'hp_pct') / 100.0))::int);
+  cur_player_hp := least(p.hp, cur_player_max_hp);
   cur_actions := p.actions - action_cost; -- spent once, up front, no matter how the fight goes
 
-  -- outer loop: one iteration per BATTLE. Only starts a new battle while
-  -- under the soft budget; once a battle starts, the inner loop always
-  -- runs it to a real resolution (a kill or a death), never breaking off
+  -- outer loop: one iteration per PACK. Only starts a new pack while under
+  -- the soft budget; once a pack is underway, the inner loop always runs
+  -- it to a real resolution (a clear or a death), never breaking off
   -- partway through just because the budget ran out mid-fight.
   <<battles>>
   loop
@@ -767,92 +1125,107 @@ begin
 
     <<exchanges>>
     loop
-      exit battles when rounds_run >= rounds_hard_cap; -- absolute safety valve, even mid-battle
+      exit battles when rounds_run >= rounds_hard_cap; -- absolute safety valve, even mid-pack
       rounds_run := rounds_run + 1;
       round_hits := '[]'::jsonb;
 
-      -- player's swing: Power vs. the enemy's (tier-scaled) Defense, with a
-      -- Crit chance to double it
-      hit_dmg := greatest(1, p.attack - stats.eff_defense);
-      was_crit := random() < (p.crit / 100.0);
-      if was_crit then hit_dmg := hit_dmg * 2; end if;
-      cur_enemy_hp := greatest(0, cur_enemy_hp - hit_dmg);
-      total_damage := total_damage + hit_dmg;
-      round_hits := round_hits || jsonb_build_array(jsonb_build_object(
-        'source', 'player', 'dmg', hit_dmg, 'crit', was_crit, 'multi_strike', false
-      ));
+      -- player's primary swing: targets the first still-alive pack member
+      select min(idx - 1) into target_idx
+        from jsonb_array_elements(cur_pack) with ordinality as t(elem, idx)
+        where (elem->>'hp')::int > 0;
 
-      -- Multi Strike: a chance of a second swing landing in the same round
-      if cur_enemy_hp > 0 and random() < (p.multi_strike / 100.0) then
-        hit_dmg := greatest(1, p.attack - stats.eff_defense);
-        was_crit := random() < (p.crit / 100.0);
-        if was_crit then hit_dmg := hit_dmg * 2; end if;
-        cur_enemy_hp := greatest(0, cur_enemy_hp - hit_dmg);
-        total_damage := total_damage + hit_dmg;
+      if target_idx is not null then
+        member := cur_pack -> target_idx;
+        select * into hit from compute_damage(p.attack, p.crit, (member->>'defense')::numeric, player_mods, enemy_mods);
+        cur_pack := jsonb_set(cur_pack, array[target_idx::text, 'hp'],
+          to_jsonb(greatest(0, (member->>'hp')::int - hit.dmg)));
+        total_damage := total_damage + hit.dmg;
         round_hits := round_hits || jsonb_build_array(jsonb_build_object(
-          'source', 'player', 'dmg', hit_dmg, 'crit', was_crit, 'multi_strike', true
+          'source', 'player', 'target', target_idx, 'dmg', hit.dmg, 'crit', hit.was_crit, 'multi_strike', false
         ));
+
+        -- Multi Strike: a bonus swing that CASCADES to the next still-alive
+        -- member (re-hitting the same one if it's the last one standing) —
+        -- this is what makes the stat directly valuable against a pack,
+        -- not just a flat extra hit on a single target.
+        if random() < (p.multi_strike / 100.0) then
+          select min(idx - 1) into target_idx
+            from jsonb_array_elements(cur_pack) with ordinality as t(elem, idx)
+            where (elem->>'hp')::int > 0;
+          if target_idx is not null then
+            member := cur_pack -> target_idx;
+            select * into hit from compute_damage(p.attack, p.crit, (member->>'defense')::numeric, player_mods, enemy_mods);
+            cur_pack := jsonb_set(cur_pack, array[target_idx::text, 'hp'],
+              to_jsonb(greatest(0, (member->>'hp')::int - hit.dmg)));
+            total_damage := total_damage + hit.dmg;
+            round_hits := round_hits || jsonb_build_array(jsonb_build_object(
+              'source', 'player', 'target', target_idx, 'dmg', hit.dmg, 'crit', hit.was_crit, 'multi_strike', true
+            ));
+          end if;
+        end if;
       end if;
 
-      if cur_enemy_hp <= 0 then
-        -- battle resolved: the enemy died. The player's hp CARRIES OVER
-        -- (no free heal on a kill) — a kill fully resolves within the same
-        -- RPC call as the rest of the fight, so healing to full here made
-        -- the player's hp bar snap back to full on almost every tick and
-        -- never visibly drain. Only an actual death (below) resets it.
-        -- Log this round against the enemy that was actually just fought
-        -- (name/max hp before it gets replaced by the next spawn below).
+      any_alive := exists (select 1 from jsonb_array_elements(cur_pack) e where (e->>'hp')::int > 0);
+
+      if not any_alive then
+        -- pack cleared: rewards are summed from every member's ORIGINAL
+        -- xp/gold (those fields never mutate — only 'hp' does), scaled by
+        -- how much harder the player's own selections made this fight.
+        select coalesce(sum((e->>'xp')::int), 0), coalesce(sum((e->>'gold')::int), 0)
+          into pack_xp, pack_gold from jsonb_array_elements(cur_pack) e;
+        pack_xp := round(pack_xp * reward_mult);
+        pack_gold := round(pack_gold * reward_mult);
+
         round_log := round_log || jsonb_build_array(jsonb_build_object(
-          'hits', round_hits,
-          'enemy_hp', 0, 'enemy_max_hp', cur_enemy_max_hp, 'enemy_name', cur_enemy_name,
-          'player_hp', cur_player_hp, 'player_max_hp', p.max_hp, 'event', 'kill',
-          'xp_gained', stats.eff_xp, 'gold_gained', stats.eff_gold
+          'hits', round_hits, 'pack', cur_pack,
+          'player_hp', cur_player_hp, 'player_max_hp', cur_player_max_hp,
+          'event', 'kill', 'xp_gained', pack_xp, 'gold_gained', pack_gold
         ));
 
         total_kills := total_kills + 1;
-        total_xp := total_xp + stats.eff_xp;
-        total_gold := total_gold + stats.eff_gold;
+        total_xp := total_xp + pack_xp;
+        total_gold := total_gold + pack_gold;
 
-        cur_tier := roll_enemy_tier();
-        select * into stats from enemy_effective_stats(p_enemy_key, cur_tier);
-        cur_enemy_hp := stats.eff_max_hp;
-        cur_enemy_max_hp := stats.eff_max_hp;
-        cur_enemy_name := stats.display_name;
+        cur_pack := apply_hp_mod(roll_pack(p_enemy_key, p.sel_pack_size, p.sel_banishment_bracket), hp_pct);
         exit exchanges; -- back to the battles loop to decide whether to start another
       end if;
 
-      -- enemy's counter-swing: its (tier-scaled) Attack vs. the player's Defense
-      hit_dmg := greatest(1, stats.eff_attack - p.defense);
-      cur_player_hp := greatest(0, cur_player_hp - hit_dmg);
-      round_hits := round_hits || jsonb_build_array(jsonb_build_object(
-        'source', 'enemy', 'dmg', hit_dmg, 'crit', false, 'multi_strike', false
-      ));
+      -- every still-alive pack member swings back this round — more
+      -- enemies alive means more incoming hits per round, which is what
+      -- makes Number of Enemies Spawned a real difficulty knob rather than
+      -- just a bigger shared hp pool.
+      for i in 0 .. jsonb_array_length(cur_pack) - 1 loop
+        member := cur_pack -> i;
+        if (member->>'hp')::int > 0 then
+          select * into hit from compute_damage((member->>'attack')::numeric, 0, p.defense::numeric, enemy_mods, player_mods);
+          cur_player_hp := greatest(0, cur_player_hp - hit.dmg);
+          round_hits := round_hits || jsonb_build_array(jsonb_build_object(
+            'source', 'enemy', 'source_slot', i, 'dmg', hit.dmg, 'crit', hit.was_crit
+          ));
+        end if;
+      end loop;
+
       if cur_player_hp <= 0 then
-        -- battle resolved: the player died — still no real penalty (TUNE),
-        -- but it's a tracked, reported outcome now, not a silent reset
+        -- pack wiped the player — WIN-ONLY REWARDS: nothing is granted
+        -- here, only on a clear above. Still a tracked, reported outcome,
+        -- not a silent reset. Full heal (to this fight's effective cap)
+        -- and a fresh pack, same selections/affixes/debuffs — no other
+        -- penalty (a TUNE spot once that becomes a real feature).
         round_log := round_log || jsonb_build_array(jsonb_build_object(
-          'hits', round_hits,
-          'enemy_hp', cur_enemy_hp, 'enemy_max_hp', cur_enemy_max_hp, 'enemy_name', cur_enemy_name,
-          'player_hp', 0, 'player_max_hp', p.max_hp, 'event', 'death'
+          'hits', round_hits, 'pack', cur_pack,
+          'player_hp', 0, 'player_max_hp', cur_player_max_hp, 'event', 'death'
         ));
 
         total_deaths := total_deaths + 1;
-        cur_player_hp := p.max_hp;
-
-        cur_tier := roll_enemy_tier(); -- a fresh foe for the next battle
-        select * into stats from enemy_effective_stats(p_enemy_key, cur_tier);
-        cur_enemy_hp := stats.eff_max_hp;
-        cur_enemy_max_hp := stats.eff_max_hp;
-        cur_enemy_name := stats.display_name;
+        cur_player_hp := cur_player_max_hp;
+        cur_pack := apply_hp_mod(roll_pack(p_enemy_key, p.sel_pack_size, p.sel_banishment_bracket), hp_pct);
         exit exchanges;
       end if;
 
-      -- an ordinary round: both sides still standing, both hp values carry
-      -- straight into the next round with no respawn involved.
+      -- an ordinary round: still fighting, everything carries into the next.
       round_log := round_log || jsonb_build_array(jsonb_build_object(
-        'hits', round_hits,
-        'enemy_hp', cur_enemy_hp, 'enemy_max_hp', cur_enemy_max_hp, 'enemy_name', cur_enemy_name,
-        'player_hp', cur_player_hp, 'player_max_hp', p.max_hp, 'event', null
+        'hits', round_hits, 'pack', cur_pack,
+        'player_hp', cur_player_hp, 'player_max_hp', cur_player_max_hp, 'event', null
       ));
     end loop exchanges;
   end loop battles;
@@ -865,11 +1238,13 @@ begin
     where id = p.id;
 
   update player_combat
-    set enemy_hp = cur_enemy_hp, enemy_tier = cur_tier, updated_at = now(), last_strike_at = now()
+    set pack = cur_pack, updated_at = now(), last_strike_at = now()
     where profile_id = auth.uid();
 
-  return query select rounds_run, total_damage, total_kills, total_deaths, cur_enemy_hp, cur_enemy_max_hp,
-    cur_enemy_name, cur_player_hp, p.max_hp, total_xp, total_gold, cur_actions, false, round_log;
+  return query select rounds_run, total_damage, total_kills, total_deaths, cur_player_hp, cur_player_max_hp,
+    total_xp, total_gold, cur_actions, false, round_log, cur_pack,
+    (select coalesce(jsonb_agg(name), '[]'::jsonb) from affix_defs where key in (select jsonb_array_elements_text(pc.affix_keys))),
+    (select coalesce(jsonb_agg(name), '[]'::jsonb) from debuff_defs where key in (select jsonb_array_elements_text(pc.debuff_keys)));
 end;
 $$;
 
@@ -1615,3 +1990,24 @@ on conflict (key) do nothing;
 insert into enemies (key, name, max_hp, attack, defense, xp_reward, gold_reward) values
   ('test_rat', 'Test Rat', 20, 2, 0, 5, 2)
 on conflict (key) do nothing;
+
+-- v1 affix/debuff content — a small starter pool so the difficulty-bracket
+-- dropdowns are functional end to end. All pure stat-mod bundles (see
+-- compute_damage's key vocabulary) so adding more later, or moving these to
+-- gear, never requires touching the combat loop itself — just another row.
+-- "on conflict do update" so re-running this file after a numbers tweak
+-- here actually applies it, rather than being silently skipped forever.
+insert into affix_defs (key, name, description, mods) values
+  ('enraged',   'Enraged',   'Enemies hit significantly harder.',       '{"attack_pct": 30}'::jsonb),
+  ('fortified', 'Fortified', 'Enemies mitigate much more damage.',      '{"defense_pct": 35}'::jsonb),
+  ('vicious',   'Vicious',   'Enemies deal extra damage on every hit.', '{"damage_pct": 25}'::jsonb),
+  ('resilient', 'Resilient', 'Enemies have much more health.',          '{"hp_pct": 50}'::jsonb),
+  ('deadly',    'Deadly',    'Enemies have a real chance to crit.',     '{"crit_chance_flat": 20}'::jsonb)
+on conflict (key) do update set name = excluded.name, description = excluded.description, mods = excluded.mods;
+
+insert into debuff_defs (key, name, description, mods) values
+  ('weakened', 'Weakened', 'Your Power is reduced for this fight.',      '{"attack_pct": -20}'::jsonb),
+  ('exposed',  'Exposed',  'Your Defense is reduced for this fight.',    '{"defense_pct": -25}'::jsonb),
+  ('fragile',  'Fragile',  'Your max HP is reduced for this fight.',     '{"hp_pct": -20}'::jsonb),
+  ('clumsy',   'Clumsy',   'Your Crit chance is reduced for this fight.','{"crit_chance_flat": -10}'::jsonb)
+on conflict (key) do update set name = excluded.name, description = excluded.description, mods = excluded.mods;

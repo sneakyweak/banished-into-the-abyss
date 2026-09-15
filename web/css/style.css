@@ -450,11 +450,12 @@ button:disabled { opacity: 0.4; cursor: not-allowed; }
 
 .battle-arena {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   justify-content: center;
-  gap: 28px;
+  flex-wrap: wrap;
+  gap: 20px;
   margin: 0 auto 14px;
-  max-width: 520px;
+  max-width: 720px;
 }
 .battle-side {
   display: flex;
@@ -474,12 +475,29 @@ button:disabled { opacity: 0.4; cursor: not-allowed; }
 }
 .battle-sub { font-size: 0.75rem; color: var(--dim); }
 
-/* Center art slot — placeholder until per-mob art exists. Swap
+/* The enemy pack: 1-5 member cards, wrapping as needed. Each card is a
+   narrower .battle-side.battle-enemy.pack-member so several fit side by
+   side; a cleared member (hp 0) dims out rather than disappearing, so the
+   pack's original size stays visible mid-fight. */
+.battle-pack {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 14px;
+  justify-content: center;
+  flex: 1 1 auto;
+}
+.pack-member {
+  flex: 0 0 120px;
+  width: 120px;
+}
+.pack-member-dead { opacity: 0.35; }
+
+/* Placeholder mob-art slot — one per pack member. Swap
    .battle-mob-placeholder-icon for an <img> with object-fit: cover once
-   real artwork is dropped in; the slot's size/border stays the same. */
+   real per-enemy artwork exists; the slot's size/border stays the same. */
 .battle-mob-slot {
-  width: 84px;
-  height: 84px;
+  width: 64px;
+  height: 64px;
   flex: 0 0 auto;
   border: 1px dashed var(--border);
   border-radius: 8px;
@@ -489,7 +507,7 @@ button:disabled { opacity: 0.4; cursor: not-allowed; }
   justify-content: center;
 }
 .battle-mob-placeholder-icon {
-  font-size: 1.8rem;
+  font-size: 1.4rem;
   color: var(--dim);
   opacity: 0.6;
 }
@@ -499,10 +517,39 @@ button:disabled { opacity: 0.4; cursor: not-allowed; }
 .hp-fill { background: linear-gradient(90deg, var(--danger), #ff8a5b); height: 100%; width: 100%; transition: width 0.3s; }
 .hp-fill-player { background: linear-gradient(90deg, var(--good), #7fe0a0); }
 
+.active-modifiers { min-height: 1.2em; font-size: 0.78rem; color: var(--accent-bright); }
+
 .battle-panel { text-align: center; }
 .battle-panel .panel-title { text-align: center; }
 .battle-panel .tick-bar { max-width: 420px; margin-left: auto; margin-right: auto; }
 .battle-panel .log { text-align: center; }
+
+.encounter-settings {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 14px;
+  justify-content: center;
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px dotted var(--border);
+}
+.encounter-setting {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 0.75rem;
+  color: var(--dim);
+  text-align: left;
+}
+.encounter-setting select {
+  background: #0c0a10;
+  border: 1px solid var(--border);
+  color: var(--text);
+  padding: 5px 8px;
+  border-radius: 4px;
+  font-family: inherit;
+  font-size: 0.85rem;
+}
 
 #member-list { list-style: none; padding: 0; margin: 0 0 10px; font-size: 0.85rem; color: var(--dim); }
 #member-list li { padding: 2px 0; }

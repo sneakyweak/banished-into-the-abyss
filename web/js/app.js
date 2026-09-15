@@ -10,12 +10,14 @@ const state = {
   guild: null,        // { id, name, tag, ... }
   myRole: null,       // this player's role in state.guild: 'leader' | 'officer' | 'member' | null
   members: [],
-  enemy: null,         // { enemy_key, enemy_hp, name, max_hp, attack, xp_reward, gold_reward }
+  pack: [],            // current enemy pack: [{ enemy_key, name, tier, hp, max_hp, attack, defense, xp, gold }, ...]
+  affixNames: [],      // display names of this pack's active affixes (enemy-side modifiers)
+  debuffNames: [],     // display names of this pack's active debuffs (player-side, self-imposed)
   // Running totals for this browser session (resets on page load — not
   // persisted server-side). Extensible: add more fields here (crits landed,
   // status effects applied/received, etc.) as those get tracked, and add a
   // matching line to renderBattleStats() below.
-  battleStats: { damageDealt: 0, damageTaken: 0, kills: 0, deaths: 0 },
+  battleStats: { damageDealt: 0, damageTaken: 0, kills: 0, deaths: 0, idleXp: 0, idleGold: 0 },
   activeTab: "global", // 'global' | 'guild' | 'whispers'
   chatChannelSub: null,
   whisperSub: null,
@@ -335,7 +337,7 @@ async function enterGame(user) {
   await loadProfile();
   await loadGuildMembership();
   await loadInventory();
-  await loadEnemy();
+  await loadPack();
   renderBattleStats();
   await loadChatHistory("global");
   subscribeChat("global");
@@ -387,6 +389,15 @@ function renderProfile() {
   const className = p.class ? p.class.charAt(0).toUpperCase() + p.class.slice(1) : "Wanderer";
   $("avatar-portrait").src = portraitSrc;
   $("avatar-portrait").alt = className;
+  // Cache the real class so the inline script next to the img tag (see
+  // index.html) can set the correct portrait immediately on the NEXT page
+  // load, before this profile fetch even starts — that's what stops the
+  // portrait flashing the warrior image first and then swapping.
+  try {
+    localStorage.setItem(LAST_CLASS_KEY, p.class);
+  } catch (e) {
+    // localStorage unavailable — worst case the flash comes back, harmless
+  }
 
   $("stat-depth").textContent = p.depth;
   $("stat-level").textContent = p.level;
@@ -405,85 +416,211 @@ function renderProfile() {
   const hpPct = Math.max(0, Math.min(100, (p.hp / p.max_hp) * 100));
   $("player-hp-fill").style.width = hpPct + "%";
   $("player-hp-text").textContent = `${p.hp} / ${p.max_hp} HP`;
+
+  renderEncounterSettings();
 }
 
+const LAST_CLASS_KEY = "bita_last_class";
+
+// The 4 difficulty-bracket dropdowns below Refresh Actions. Ranges are
+// fixed except Number of Banishments, which depends on the player's own
+// Depth (profiles.depth == banishment count) — it goes up to Depth + 3, so
+// a player can voluntarily push a few brackets above their own progress
+// for better rewards at a real risk of losing (see set_encounter_settings
+// in schema.sql, which enforces this same cap server-side).
+function renderEncounterSettings() {
+  const p = state.profile;
+  if (!p) return;
+  populateSelect($("sel-affix-count"), 0, 5, p.sel_affix_count);
+  populateSelect($("sel-pack-size"), 1, 5, p.sel_pack_size);
+  populateSelect($("sel-debuff-count"), 0, 4, p.sel_debuff_count);
+  populateSelect($("sel-banishment-bracket"), 0, p.depth + 3, p.sel_banishment_bracket);
+}
+
+// Rebuilds a <select>'s options only when the wanted range actually
+// changed (e.g. Depth just increased from a banishment) — rebuilding on
+// every profile refresh would reset the dropdown's open/focus state for no
+// reason on the far more common case where nothing changed.
+function populateSelect(select, min, max, selectedValue) {
+  if (!select) return;
+  const wanted = [];
+  for (let v = min; v <= max; v++) wanted.push(String(v));
+  const current = Array.from(select.options).map((o) => o.value);
+  if (current.join(",") !== wanted.join(",")) {
+    select.innerHTML = "";
+    wanted.forEach((v) => {
+      const opt = document.createElement("option");
+      opt.value = v;
+      opt.textContent = v;
+      select.appendChild(opt);
+    });
+  }
+  select.value = String(selectedValue);
+}
+
+// Applies whatever the 4 dropdowns currently say via set_encounter_settings
+// (validated server-side too — see schema.sql), then reloads the profile
+// (in case the bracket cap needs re-checking) and spawns a fresh pack under
+// the new settings. A rejected change (e.g. a stale bracket cap after this
+// tab sat open through a banishment elsewhere) snaps the dropdowns back to
+// the last known-good server state instead of leaving them showing
+// something that didn't actually take effect.
+async function applyEncounterSettings() {
+  const p_pack_size = parseInt($("sel-pack-size").value, 10);
+  const p_affix_count = parseInt($("sel-affix-count").value, 10);
+  const p_debuff_count = parseInt($("sel-debuff-count").value, 10);
+  const p_banishment_bracket = parseInt($("sel-banishment-bracket").value, 10);
+
+  const { error } = await sb.rpc("set_encounter_settings", {
+    p_pack_size,
+    p_affix_count,
+    p_debuff_count,
+    p_banishment_bracket,
+  });
+  if (error) {
+    alert(error.message);
+    renderEncounterSettings();
+    return;
+  }
+  await loadProfile();
+  await loadPack();
+}
+
+["sel-affix-count", "sel-pack-size", "sel-debuff-count", "sel-banishment-bracket"].forEach((id) => {
+  $(id)?.addEventListener("change", applyEncounterSettings);
+});
+
 // ---------------------------------------------------------------------------
-// Solo enemy combat (Test Rat) — drives the Current Battle panel's player
-// vs. enemy display independently of guilds.
+// Pack combat (Test Rat) — drives the Current Battle panel's player vs.
+// enemy-pack display independently of guilds. The player fights 1-5
+// enemies at once (see the encounter-settings dropdowns above); each has
+// its own mini card with a name, hp bar, and a placeholder art slot.
 // ---------------------------------------------------------------------------
 
 const TEST_ENEMY_KEY = "test_rat";
 
-async function loadEnemy() {
-  const { data, error } = await sb.rpc("get_or_spawn_player_enemy", { p_enemy_key: TEST_ENEMY_KEY });
+async function loadPack() {
+  const { data, error } = await sb.rpc("get_or_spawn_pack", { p_enemy_key: TEST_ENEMY_KEY });
   if (error) return console.error(error);
-  const pc = Array.isArray(data) ? data[0] : data; // single-row RPC shape varies by PostgREST version
-  // get_or_spawn_player_enemy already returns tier-adjusted display name +
-  // max hp (Elite/Champion prefix and scaled stats) — no separate `enemies`
-  // table read needed.
-  state.enemy = { name: pc.display_name, tier: pc.tier, enemy_hp: pc.enemy_hp, max_hp: pc.enemy_max_hp };
-  renderEnemy();
+  const row = Array.isArray(data) ? data[0] : data; // single-row RPC shape varies by PostgREST version
+  state.pack = Array.isArray(row.pack) ? row.pack : [];
+  state.affixNames = Array.isArray(row.affix_names) ? row.affix_names : [];
+  state.debuffNames = Array.isArray(row.debuff_names) ? row.debuff_names : [];
+  renderPack(state.pack);
+  renderActiveModifiers();
 }
 
-function renderEnemy() {
-  const en = state.enemy;
-  if (!en) return;
-  $("enemy-name").textContent = en.name;
-  const pct = Math.max(0, Math.min(100, (en.enemy_hp / en.max_hp) * 100));
-  $("enemy-hp-fill").style.width = pct + "%";
-  $("enemy-hp-text").textContent = `${en.enemy_hp} / ${en.max_hp} HP`;
+// Renders the whole pack side of the arena as one card per member — a name,
+// hp bar, and a placeholder art slot (swap for a real <img> per enemy_key
+// once mob art exists; nothing else here needs to change for that).
+// Built with textContent/DOM nodes rather than innerHTML+template strings
+// since enemy names, while server-controlled today, shouldn't need an
+// escaping audit later just because this function got reused for something
+// less trusted.
+function renderPack(pack) {
+  const container = $("battle-pack");
+  if (!container) return;
+  container.innerHTML = "";
+  pack.forEach((enemy) => {
+    const hp = Math.max(0, enemy.hp);
+    const card = document.createElement("div");
+    card.className = "battle-side battle-enemy pack-member" + (hp <= 0 ? " pack-member-dead" : "");
+
+    const slot = document.createElement("div");
+    slot.className = "battle-mob-slot pack-mob-slot";
+    const icon = document.createElement("span");
+    icon.className = "battle-mob-placeholder-icon";
+    icon.textContent = "?";
+    slot.appendChild(icon);
+    card.appendChild(slot);
+
+    const name = document.createElement("div");
+    name.className = "battle-name";
+    name.textContent = enemy.name || "—";
+    card.appendChild(name);
+
+    const hpBar = document.createElement("div");
+    hpBar.className = "hp-bar";
+    const hpFill = document.createElement("div");
+    hpFill.className = "hp-fill";
+    const pct = Math.max(0, Math.min(100, (hp / enemy.max_hp) * 100));
+    hpFill.style.width = pct + "%";
+    hpBar.appendChild(hpFill);
+    card.appendChild(hpBar);
+
+    const hpText = document.createElement("div");
+    hpText.className = "battle-hp-text";
+    hpText.textContent = `${hp} / ${enemy.max_hp} HP`;
+    card.appendChild(hpText);
+
+    container.appendChild(card);
+  });
 }
 
-const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+// Small note above the battle summary listing this pack's active affixes
+// (enemy-side, from Number of Affixes) and debuffs (player-side and
+// self-imposed, from Player Debuffs) by name, so it's clear WHY a fight
+// suddenly got harder or easier after changing a dropdown.
+function renderActiveModifiers() {
+  const el = $("active-modifiers");
+  if (!el) return;
+  const parts = [];
+  if (state.affixNames.length) parts.push(`Affixes: ${state.affixNames.join(", ")}`);
+  if (state.debuffNames.length) parts.push(`Debuffs: ${state.debuffNames.join(", ")}`);
+  el.textContent = parts.join("  •  ");
+}
 
-// Paints one moment of the Current Battle panel — both hp bars plus the
-// enemy name (which can change mid-playback: a kill/death respawns into a
-// freshly-rolled tier, e.g. "Test Rat" -> "Elite Test Rat"). Used both by
-// the round-by-round playback below and to settle on the final true state.
-function renderBattleHp(enemyName, enemyHp, enemyMaxHp, playerHp, playerMaxHp) {
-  $("enemy-name").textContent = enemyName;
-  const ePct = Math.max(0, Math.min(100, (enemyHp / enemyMaxHp) * 100));
-  $("enemy-hp-fill").style.width = ePct + "%";
-  $("enemy-hp-text").textContent = `${enemyHp} / ${enemyMaxHp} HP`;
+function renderBattlePlayerHp(playerHp, playerMaxHp) {
   const pPct = Math.max(0, Math.min(100, (playerHp / playerMaxHp) * 100));
   $("player-hp-fill").style.width = pPct + "%";
   $("player-hp-text").textContent = `${playerHp} / ${playerMaxHp} HP`;
 }
 
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
 // Renders state.battleStats (running session totals) under the per-tick
-// summary line. Add a new field to state.battleStats and a matching
-// " • Label: value" clause here whenever a new stat/status gets tracked.
+// summary line. Idle xp/gold (passive, time-based — see perform_idle_tick
+// in schema.sql) are tracked and shown here SEPARATELY from combat, never
+// concatenated onto a combat result message — that concatenation used to
+// make a death read as if it had been rewarded, when the reward shown was
+// actually unrelated passive idle income (combat itself only ever grants
+// xp/gold on a win — see strike_enemy). Add a new field to state.battleStats
+// and a matching " • Label: value" clause here whenever a new stat/status
+// gets tracked.
 function renderBattleStats() {
   const s = state.battleStats;
   const el = $("battle-stats-summary");
   if (!el) return;
   el.textContent =
     `Session totals — Dmg dealt: ${s.damageDealt} • Dmg taken: ${s.damageTaken}` +
-    ` • Kills: ${s.kills} • Deaths: ${s.deaths}`;
+    ` • Kills: ${s.kills} • Deaths: ${s.deaths} • Idle: +${s.idleXp} xp, +${s.idleGold} gold`;
 }
 
 // Fired automatically once per idle tick (see doTick() below) instead of
 // from a button. Costs a flat 1 action no matter what — but each call
-// resolves one or more whole BATTLES (rounds driven by the player's Attack
+// resolves one or more whole PACKS (rounds driven by the player's Attack
 // Speed stat — see strike_enemy in schema.sql), rolling real
-// crit/multi-strike/defense math each round. Every battle always runs
-// until someone dies — a kill or a player death — rather than stopping
-// partway through undecided; a kill or a death both respawn instantly into
-// a freshly-rolled tier (normal/Elite/Champion), so the enemy name/hp can
-// change over the course of one call — row.enemy_name/enemy_hp/enemy_max_hp
-// always reflect where the fight ended up. out_of_actions is only ever
-// true when the action pool was already empty before this call started
-// (the flat cost means a fight in progress is never cut short by actions
+// crit/multi-strike/defense math each round against every still-alive
+// member of the current pack. Every pack always runs until someone dies —
+// fully cleared, or the player does — rather than stopping partway through
+// undecided; either respawns a fresh pack instantly under the same
+// selections, so row.final_pack always reflects where the fight ended up.
+// XP/GOLD ARE WIN-ONLY: row.xp_gained/gold_gained are only ever nonzero
+// when kills > 0 — a pack wipe (deaths > 0) always reports 0 for both,
+// enforced server-side in strike_enemy. out_of_actions is only ever true
+// when the action pool was already empty before this call started (the
+// flat cost means a fight in progress is never cut short by actions
 // running out mid-way). Returns a short message for the tick log, or null
 // if there's nothing worth reporting (on cooldown, 0 rounds run).
 //
-// row.rounds_log carries one entry per round actually fought (hp right
-// after that round's blows, before any kill/death respawn) — without this,
-// the panel only ever showed the state AFTER everything had already
-// resolved, which is nearly always a fresh/full-looking bar, so it looked
-// like nobody was taking any damage. This plays that log back with a short
-// delay per round before settling on the true final state, capped well
-// under the 8s tick interval so it always finishes before the next tick.
+// row.rounds_log carries one entry per round actually fought (the whole
+// pack's hp right after that round's blows, before any clear/death
+// respawn) — without this, the panel only ever showed the state AFTER
+// everything had already resolved, which is nearly always a fresh/
+// full-looking pack, so it looked like nobody was taking any damage. This
+// plays that log back with a short delay per round before settling on the
+// true final state, capped well under the 8s tick interval so it always
+// finishes before the next tick.
 async function autoStrikeEnemy() {
   const { data, error } = await sb.rpc("strike_enemy", { p_enemy_key: TEST_ENEMY_KEY });
   if (error) {
@@ -516,29 +653,29 @@ async function autoStrikeEnemy() {
     const roundDelayMs = log.length > 15 ? 120 : 200;
     const eventDelayMs = log.length > 15 ? 200 : 350;
     for (const entry of log) {
-      renderBattleHp(entry.enemy_name, entry.enemy_hp, entry.enemy_max_hp, entry.player_hp, entry.player_max_hp);
+      renderBattlePlayerHp(entry.player_hp, entry.player_max_hp);
+      renderPack(Array.isArray(entry.pack) ? entry.pack : []);
       await sleep(entry.event ? eventDelayMs : roundDelayMs);
     }
   }
 
   // settle on the true final state regardless of whether anything animated
   // (covers the 0-round cooldown / out-of-actions case too)
-  if (state.enemy) {
-    state.enemy.name = row.enemy_name;
-    state.enemy.enemy_hp = row.enemy_hp;
-    state.enemy.max_hp = row.enemy_max_hp;
-  }
-  renderBattleHp(row.enemy_name, row.enemy_hp, row.enemy_max_hp, row.player_hp, row.player_max_hp);
+  state.pack = Array.isArray(row.final_pack) ? row.final_pack : [];
+  state.affixNames = Array.isArray(row.affix_names) ? row.affix_names : [];
+  state.debuffNames = Array.isArray(row.debuff_names) ? row.debuff_names : [];
+  renderBattlePlayerHp(row.player_hp, row.player_max_hp);
+  renderPack(state.pack);
+  renderActiveModifiers();
 
   if (row.rounds_fought === 0) {
     return row.out_of_actions ? "Out of actions — click Refresh Actions to keep fighting." : null;
   }
 
-  const enemyName = row.enemy_name || "the enemy";
   const roundsText = `${row.rounds_fought} round${row.rounds_fought === 1 ? "" : "s"}`;
   const outcomes = [];
   if (row.kills > 0) {
-    outcomes.push(row.kills === 1 ? `slew ${enemyName}` : `slew ${enemyName} x${row.kills}`);
+    outcomes.push(row.kills === 1 ? "cleared the pack" : `cleared the pack x${row.kills}`);
   }
   if (row.deaths > 0) {
     outcomes.push(row.deaths === 1 ? "were struck down" : `were struck down x${row.deaths}`);
@@ -549,7 +686,7 @@ async function autoStrikeEnemy() {
     msg = `You ${outcomes.join(" and ")} over ${roundsText}!`;
     if (row.xp_gained > 0 || row.gold_gained > 0) msg += ` +${row.xp_gained} xp, +${row.gold_gained} gold.`;
   } else {
-    msg = `You struck ${enemyName} ${roundsText} for ${row.damage_dealt} damage.`;
+    msg = `You dealt ${row.damage_dealt} damage over ${roundsText}.`;
   }
   if (row.out_of_actions) msg += " Out of actions.";
   return msg;
@@ -598,18 +735,22 @@ async function doTick() {
   if (error) return console.error(error);
   const row = data?.[0];
 
-  // one auto-strike against the current enemy per tick — costs 1 action,
+  // one auto-strike against the current pack per tick — costs 1 action,
   // stops gracefully once the pool is empty (see autoStrikeEnemy above)
   const strikeMsg = await autoStrikeEnemy();
 
   await loadProfile();
 
-  const parts = [];
+  // Passive idle income (time-based, unrelated to combat) is tracked in
+  // the session-totals line, not concatenated onto the combat message —
+  // see the comment on renderBattleStats for why that used to be
+  // confusing. tick-log shows ONLY the actual combat outcome.
   if (row && (row.xp_gained > 0 || row.gold_gained > 0)) {
-    parts.push(`+${row.xp_gained} xp, +${row.gold_gained} gold`);
+    state.battleStats.idleXp += row.xp_gained || 0;
+    state.battleStats.idleGold += row.gold_gained || 0;
+    renderBattleStats();
   }
-  if (strikeMsg) parts.push(strikeMsg);
-  if (parts.length) $("tick-log").textContent = parts.join("  •  ");
+  if (strikeMsg) $("tick-log").textContent = strikeMsg;
 }
 
 $("btn-refresh-actions").addEventListener("click", async () => {
@@ -682,7 +823,7 @@ $("btn-perform-banish").addEventListener("click", async () => {
   $("banish-overlay").classList.add("hidden");
   await loadProfile();
   await loadInventory();
-  await loadEnemy();
+  await loadPack();
 });
 
 async function loadGuildMembership() {
