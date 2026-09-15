@@ -22,8 +22,8 @@ create table if not exists profiles (
   abyssal_prowess  bigint not null default 0,     -- prestige currency, earned via Banishment (see perform_banishment)
   class            text not null default 'warrior' check (class in ('warrior','archer','magi','striker')),
   depth            int not null default 0,         -- prestige tier ("how deep")
-  hp               int not null default 100,        -- current hp (solo combat)
-  max_hp           int not null default 100,
+  hp               int not null default 10,         -- current hp (solo combat)
+  max_hp           int not null default 10,
   attack           int not null default 10,
   defense          int not null default 5,
   actions          int not null default 3000,       -- spendable action points
@@ -43,9 +43,24 @@ create unique index if not exists idx_profiles_username_ci on profiles (lower(us
 -- if they're already there.
 alter table profiles add column if not exists actions int not null default 3000;
 alter table profiles add column if not exists max_actions int not null default 3000;
-alter table profiles add column if not exists hp int not null default 100;
+alter table profiles add column if not exists hp int not null default 10;
 alter table profiles add column if not exists class text not null default 'warrior'
   check (class in ('warrior','archer','magi','striker'));
+
+-- starting health dropped from 100 to 10 (a deliberate difficulty change,
+-- not a per-player choice). "create table if not exists" above only sets
+-- the default for a table that doesn't exist yet — on a project that's
+-- already deployed, the columns still default to 100 for every NEW signup
+-- until the column default itself is changed here.
+alter table profiles alter column hp set default 10;
+alter table profiles alter column max_hp set default 10;
+
+-- retroactively apply the new baseline to any EXISTING character still
+-- sitting at the old untouched default. Scoped tightly to hp=100/max_hp=100
+-- so it never touches a character that's already progressed past 100 max
+-- hp via Banishment retention; safe to re-run since those rows no longer
+-- match after the first pass.
+update profiles set hp = 10, max_hp = 10 where hp = 100 and max_hp = 100;
 
 -- rename the old "shards" column to "abyssal_prowess" (same values, clearer
 -- name now that it's the currency driving Banishment's retention tiers).
@@ -782,7 +797,7 @@ declare
   prowess_gain bigint;
   base_attack int := 10;   -- TUNE: matches profiles.attack's default for a fresh character
   base_defense int := 5;   -- TUNE: matches profiles.defense's default
-  base_max_hp int := 100;  -- TUNE: matches profiles.max_hp's default
+  base_max_hp int := 10;   -- TUNE: matches profiles.max_hp's default
   new_attack int;
   new_defense int;
   new_max_hp int;
