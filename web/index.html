@@ -18,6 +18,12 @@
         <span class="brand-compact-line">The</span>
       </span>
       <span class="brand-compact-abyss">Abyss</span>
+      <!-- Opens #patch-notes-overlay, the full browsable patch history --
+           every future patch's notes get added to window.PATCH_NOTES
+           (below) and show up here automatically. Distinct from
+           #new-version-overlay, which only ever shows the LATEST patch's
+           notes, once, to a returning player. -->
+      <button type="button" id="btn-patch-notes" class="patch-notes-btn">Patch Notes <span id="patch-notes-version-tag"></span></button>
     </div>
     <div class="topbar-right">
       <button id="btn-signout" class="btn-ghost hidden">Sign Out</button>
@@ -448,43 +454,72 @@
     </div>
   </div>
 
+  <!-- Full, browsable patch history -- opened from the "Patch Notes" button
+       next to the title (top-left). Every version in window.PATCH_NOTES
+       (below) gets its own heading + note list here, newest first, built
+       by renderPatchNotesHistory() in app.js. Distinct from
+       #new-version-overlay above, which only ever shows the single latest
+       version's notes, and only once, to a returning player. -->
+  <div id="patch-notes-overlay" class="overlay hidden">
+    <div class="panel overlay-panel">
+      <button type="button" id="btn-close-patch-notes-overlay" class="overlay-close" aria-label="Close">&times;</button>
+      <h2 class="panel-title">Patch Notes</h2>
+      <div id="patch-notes-history" class="patch-notes-history"></div>
+    </div>
+  </div>
+
+  <!-- Shown once, right after login, when perform_idle_tick() reports a
+       meaningful chunk of elapsed offline time (see
+       maybeShowWelcomeBackSummary in app.js) -- a quick page refresh while
+       already playing stays silent; only a real "was away" gap shows this. -->
+  <div id="welcome-back-overlay" class="overlay hidden">
+    <div class="panel overlay-panel">
+      <button type="button" id="btn-close-welcome-back-overlay" class="overlay-close" aria-label="Close">&times;</button>
+      <h2 class="panel-title">Welcome Back</h2>
+      <p id="welcome-back-away-time" class="log"></p>
+      <div class="panel-divider"></div>
+      <ul class="stat-list">
+        <li><span class="stat-label">XP Earned</span><span id="welcome-back-xp">0</span></li>
+        <li><span class="stat-label">Gold Earned</span><span id="welcome-back-gold">0</span></li>
+      </ul>
+      <button id="btn-welcome-back-continue">Continue</button>
+    </div>
+  </div>
+
   <!-- Bump APP_VERSION on every shipped build (any deploy of
-       app.js/index.html/etc.) and replace PATCH_NOTES with that build's
-       notes, so returning players who last loaded an older version see the
-       new-version popup above — with these notes — exactly once. A
-       brand-new visitor never sees it — only a browser that previously
-       stored a different version. -->
+       app.js/index.html/etc.) and add a new {version, notes} entry to the
+       FRONT of PATCH_NOTES with that build's notes -- so returning players
+       who last loaded an older version see the new-version popup above
+       (with just that latest entry's notes) exactly once, and the "Patch
+       Notes" button (top-left) shows the full history, newest first. A
+       brand-new visitor never sees the popup -- only a browser that
+       previously stored a different version.
+
+       Versioning restarts here at 0.001 (semver-ish: MAJOR.MINOR.PATCH,
+       zero-padded to 3 digits) -- everything before this was tracked as a
+       flat, ungrouped note list under plain integer version numbers
+       (17-22); that history is preserved in git, just not carried forward
+       into this new per-version structure. PATCH_NOTES must stay valid,
+       trailing-comma-free JSON (double-quoted keys/strings) at every
+       nesting level -- app.js's parsePatchNotes() extracts and JSON.parses
+       this literal straight out of a fetched copy of this file. -->
   <script>
-    window.APP_VERSION = "22";
+    window.APP_VERSION = "0.001";
     window.PATCH_NOTES = [
-      "Speed is now wired into combat: it decides who swings first each round (compared against the pack's current average Speed, recomputed as members die -- ties go to you), and separately grants Evasion, a flat chance to dodge an enemy hit entirely (1 Speed = 1% Evasion, capped at 50%). Evasion is shown as its own line in Combat Stats.",
-      "New: dying now costs you 25% of your current gold and 10% of your current xp -- pushing your difficulty settings past your comfort zone is a real risk now, not a free reset.",
-      "The enemy pack now lays out 2 per row instead of 1, so a full pack takes half as many rows to show.",
-      "\"Session totals\" is now \"Daily Totals\", moved to the top of Current Battle, and resets once per calendar day instead of once per page reload -- it's tracked server-side now, so it stays consistent across tabs/devices instead of zeroing out every time you reload. The spot below the battle now shows only the current tick's fight outcome.",
-      "Equipment gained a Weapon slot. Helm now sits alone, centered above the rest, like a head slot on a classic equipment layout.",
-      "The 4 encounter-difficulty fields now show their real max value right in the label (e.g. \"Number of Affixes (max 11)\"), their labels wrap instead of overflowing past the input box, and the native up/down spinner arrows are gone (they were never the fast way to set these -- typing is).",
-      "New affixes and debuffs, Abyssal/Void themed: enemies can now roll Voidscarred, Blackened Hide, Ravenous, Hollow Carapace, Voidtouched, or Maw of the Deep (11 affixes total, up from 5); Player Debuffs gained Voidbound, Chilled Blood, Marked by the Deep, Sundered Grip, and Sapped (9 debuffs total, up from 4).",
-      "Number of Enemies Spawned now goes up to 30 (was capped at 5).",
-      "The enemy pack now renders as a clean vertical list of rows instead of wrapping side-by-side columns -- much easier to read once a pack has more than a couple members.",
-      "Fixed a longstanding bug where Number of Affixes / Player Debuffs could silently reject a value the game itself said was valid, once the affix/debuff catalog grew past its original launch-day size.",
-      "Classes now have real starting bonuses instead of being purely cosmetic — Warrior (+5% HP/Defense/Power), Archer (+10% Crit/Power, -5% Defense), Magi (+10% Multi Strike/Crit, +5% Power, -20% Defense), Striker (+20% Multi Strike/Crit, -10% Defense). Shown right on the class-select screen.",
-      "You now choose your class again each time you Banish, instead of being stuck with your first pick forever.",
-      "New: an optional security question, set at signup, lets you reset your own password later — there's a 'Forgot password?' link on the sign-in screen. No email address is ever needed.",
-      "Compressed the sign-in screen (smaller title, smaller class art) so it all fits on one screen instead of needing a scroll, and rearranged the corner logo to Banished / Into-The / Abyss in one line.",
-      "Fixed: Current Battle's HP bars were staggered because the enemy side had an art slot above its name and the player side didn't — added a matching portrait slot on the player's side so both line up.",
-      "Fixed: the Combat Stats panel (Power/Defense/Crit/Multi Strike) now actually reflects your class's bonus instead of always showing the same base numbers for every class.",
-      "Combat Stats now has a reserved \"Additional Affixes\" section with a few open slots for the affixes gear will eventually roll.",
-      "Early-game rebalance: starting Power/Defense/HP raised (were too small for class bonuses to actually show up in a fight). Every class bonus is now a pure positive -- Archer, Magi and Striker's old Defense penalties are gone, replaced with +5% Attack Speed (Archer/Striker) or +5% HP (Magi). All bonuses are still percentages, so they keep growing in real terms as your stats do.",
-      "Fixed: a fast tick could occasionally kill (or resurrect-and-re-kill) the player more than once in a single Refresh Actions cycle by quietly starting a second fight in the leftover round budget. Each tick is now strictly one fight, run for as many rounds as your Attack Speed allows -- the moment either side dies, that tick is done; an unfinished fight just resumes next tick.",
-      "Fixed: Current Battle's HP bars were staggered again -- the enemy cards had an extra blank line the player card didn't, throwing off the alignment. Also removed the redundant player portrait above the green HP bar (it's already shown elsewhere on screen).",
-      "The 4 encounter-difficulty fields (Number of Affixes, Number of Enemies Spawned, Player Debuffs, Number of Banishments) are now plain number boxes you can type a value into directly, instead of dropdowns.",
-      "New: a golden XP bar on the left tracks your progress toward the next level at a glance.",
-      "Removed the plain \"Experience\" number above Gold -- the XP bar above it already shows it.",
-      "New: hover over any stat keyword on the left (Depth, Power, Crit, etc.) for a tooltip explaining what it does.",
-      "Number of Affixes and Player Debuffs can now be stacked all the way up to however many actually exist in the game, instead of a hardcoded 5 / 4.",
-      "Number of Banishments is no longer capped a few brackets above your own Depth -- there's no ceiling at all now, and it makes the enemy pack proportionally tougher the higher you push it.",
-      "Removed Abyssal Prowess. Banishment's retention tiers (0.25% / 0.50% / 0.75% / 100%) now read directly off how many times you've Banished instead of a separate currency you had to bank up first -- same milestones and pacing as before, just one fewer number to track.",
-      "The \"Depth\" stat on the left is now labeled \"Banishments\" -- it was always just your banishment count under a different name.",
+      {
+        "version": "0.001",
+        "notes": [
+          "Combat Stats' \"Crit\" is now two stats: \"Crit Chance\" (unchanged) and a new \"Crit Damage\" (starts at 100%, meaning a crit still deals exactly double damage, same as always -- this just makes that number itemizable later).",
+          "Evasion's cap is now 25% (was 50%).",
+          "Losing xp (e.g. the death penalty) can no longer drop your level -- level only ever goes up.",
+          "Clearing a pack now heals you for 10% of your max HP, on top of the xp/gold reward.",
+          "Removed the separate \"Number of Banishments\" difficulty selector -- your real Banishment count now automatically makes every fight a little tougher (and worth a little more): +5% per Banishment, forever.",
+          "The reserved \"Additional Affixes\" slots on the Combat Stats panel now match its stat-list look instead of the Equipment panel's dashed boxes.",
+          "\"Number of Affixes\" is now \"Number of Enemy Affixes\", and the encounter-difficulty fields line up evenly now regardless of how many lines each label wraps to.",
+          "New: a \"Patch Notes\" button next to the title (top-left) opens the full patch history, any time -- this is where every future patch's notes will go.",
+          "New: logging back in after time away now shows a quick summary of what you earned while offline (xp, gold, how long you were gone)."
+        ]
+      }
     ];
   </script>
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js"></script>

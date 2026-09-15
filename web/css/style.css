@@ -67,6 +67,24 @@ body {
 .topbar-right { display: flex; align-items: center; gap: 12px; }
 .who { color: var(--dim); font-size: 0.85rem; }
 
+/* Sits right next to the title inside .brand-compact -- small/ghost so it
+   reads as a secondary link, not competing with the title itself for
+   attention. patch-notes-version-tag mirrors window.APP_VERSION, kept in
+   sync by updatePatchNotesVersionTag() in app.js. */
+.patch-notes-btn {
+  margin-left: 8px;
+  padding: 3px 8px;
+  font-size: 0.65rem;
+  letter-spacing: 0.5px;
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--dim);
+  border-radius: 4px;
+  cursor: pointer;
+}
+.patch-notes-btn:hover { border-color: var(--accent); color: var(--text); }
+#patch-notes-version-tag { color: var(--accent-bright); font-weight: bold; }
+
 /* ---------------------------------------------------------------------- */
 /* Hero title (auth screen)                                                */
 /* ---------------------------------------------------------------------- */
@@ -398,6 +416,11 @@ button:disabled { opacity: 0.4; cursor: not-allowed; }
 .patch-notes-list { margin: 4px 0 12px; padding-left: 18px; display: flex; flex-direction: column; gap: 6px; }
 .patch-notes-list li { font-size: 0.85rem; line-height: 1.4; }
 #new-version-countdown { color: var(--accent-bright); font-weight: bold; text-align: center; }
+
+/* Full patch history (#patch-notes-overlay) -- one heading + .patch-notes-list
+   per version, newest first, built by renderPatchNotesHistory() in app.js. */
+.patch-notes-version-heading { color: var(--accent-bright); margin: 0 0 6px; }
+#patch-notes-history .panel-divider:last-child { display: none; }
 
 .guild-heading-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .guild-heading-row h4 { margin: 0; }

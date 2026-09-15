@@ -820,7 +820,13 @@ create or replace function perform_idle_tick()
 returns table (
   xp_gained bigint, gold_gained bigint, new_level int, boss_damage bigint,
   daily_dmg_dealt int, daily_dmg_taken int, daily_kills int, daily_deaths int,
-  daily_idle_xp int, daily_idle_gold int, daily_reset_at date
+  daily_idle_xp int, daily_idle_gold int, daily_reset_at date,
+  elapsed_seconds bigint -- how long since last_tick_at this call actually
+                          -- covered (capped at max_offline_seconds) -- lets
+                          -- the client tell "just reloaded the page" apart
+                          -- from "was away for hours" when deciding whether
+                          -- to show a welcome-back summary (see doTick/
+                          -- maybeShowWelcomeBackSummary in app.js)
 )
 language plpgsql
 security definer
@@ -850,7 +856,8 @@ begin
     select * into daily from bump_daily_stats(); -- still refreshes/resets the daily snapshot, adds nothing
     return query select 0::bigint, 0::bigint, p.level, 0::bigint,
       daily.daily_dmg_dealt, daily.daily_dmg_taken, daily.daily_kills, daily.daily_deaths,
-      daily.daily_idle_xp, daily.daily_idle_gold, daily.daily_reset_at;
+      daily.daily_idle_xp, daily.daily_idle_gold, daily.daily_reset_at,
+      greatest(0, elapsed_seconds);
     return;
   end if;
 
@@ -877,7 +884,8 @@ begin
   -- guild bosses are disabled for now — no idle damage is fed to them.
   return query select gained_xp, gained_gold, lvl, dmg,
     daily.daily_dmg_dealt, daily.daily_dmg_taken, daily.daily_kills, daily.daily_deaths,
-    daily.daily_idle_xp, daily.daily_idle_gold, daily.daily_reset_at;
+    daily.daily_idle_xp, daily.daily_idle_gold, daily.daily_reset_at,
+    elapsed_seconds;
 end;
 $$;
 

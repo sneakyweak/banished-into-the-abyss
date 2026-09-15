@@ -76,8 +76,16 @@ function checkNewVersion() {
   }
 }
 
+// PATCH_NOTES is an array of { version, notes: [...] } entries, newest
+// first (see the script block at the bottom of index.html) -- this popup
+// only ever shows the SINGLE latest entry's notes (index 0), never the
+// full history, so a player who was away through several deploys isn't
+// dumped a wall of every patch since they last looked. The full history
+// lives behind the "Patch Notes" button instead -- see
+// renderPatchNotesHistory() below.
 function showNewVersionPopup() {
-  const notes = Array.isArray(window.PATCH_NOTES) ? window.PATCH_NOTES : [];
+  const latest = Array.isArray(window.PATCH_NOTES) ? window.PATCH_NOTES[0] : null;
+  const notes = latest?.notes ?? [];
   const list = $("patch-notes-list");
   if (list) {
     list.innerHTML = "";
@@ -89,6 +97,52 @@ function showNewVersionPopup() {
   }
   $("new-version-overlay")?.classList.remove("hidden");
   startNewVersionCountdown();
+}
+
+// The full, browsable patch history behind the "Patch Notes" button --
+// every entry in window.PATCH_NOTES, newest first, each under its own
+// version heading. Re-run every time the overlay opens (not cached) so a
+// pollForNewVersion() update that just replaced window.PATCH_NOTES is
+// always reflected immediately.
+function renderPatchNotesHistory() {
+  const container = $("patch-notes-history");
+  if (!container) return;
+  container.innerHTML = "";
+  const entries = Array.isArray(window.PATCH_NOTES) ? window.PATCH_NOTES : [];
+  if (entries.length === 0) {
+    const p = document.createElement("p");
+    p.className = "log";
+    p.textContent = "No patch notes yet.";
+    container.appendChild(p);
+    return;
+  }
+  entries.forEach((entry) => {
+    const heading = document.createElement("h3");
+    heading.className = "panel-subtitle patch-notes-version-heading";
+    heading.textContent = `Version ${entry.version}`;
+    container.appendChild(heading);
+
+    const list = document.createElement("ul");
+    list.className = "patch-notes-list";
+    (entry.notes || []).forEach((note) => {
+      const li = document.createElement("li");
+      li.textContent = note;
+      list.appendChild(li);
+    });
+    container.appendChild(list);
+
+    const divider = document.createElement("div");
+    divider.className = "panel-divider";
+    container.appendChild(divider);
+  });
+  // the loop above always trails one extra divider after the last version
+  // -- drop it so the overlay doesn't end on a floating rule.
+  container.lastElementChild?.remove();
+}
+
+function updatePatchNotesVersionTag() {
+  const tag = $("patch-notes-version-tag");
+  if (tag && window.APP_VERSION) tag.textContent = `v${window.APP_VERSION}`;
 }
 
 // Wall-clock-deadline based (NOT a decrementing tick counter) — a
@@ -154,9 +208,14 @@ function parsePatchNotes(html) {
   if (!match) return [];
   try {
     // PATCH_NOTES is written as a plain JS array literal (double-quoted
-    // strings, an allowed trailing comma) — strip the trailing comma so
-    // JSON.parse (safer than eval'ing fetched text) accepts it.
-    return JSON.parse(match[1].replace(/,(\s*\])/, "$1"));
+    // strings/keys, allowed trailing commas) — strip trailing commas so
+    // JSON.parse (safer than eval'ing fetched text) accepts it. Global and
+    // covers both "]" and "}" (not just "]"): PATCH_NOTES nests objects now
+    // ({ version, notes: [...] } per entry), so a trailing comma can appear
+    // before a "}" as easily as before a "]", and there can be more than
+    // one across the whole literal -- the old single, "]"-only replace only
+    // ever fixed the outermost array's own trailing comma.
+    return JSON.parse(match[1].replace(/,(\s*[\]}])/g, "$1"));
   } catch (e) {
     return [];
   }
@@ -191,6 +250,7 @@ async function pollForNewVersion() {
       // localStorage unavailable — the popup still shows, it just might
       // show again on a future load in this browser
     }
+    updatePatchNotesVersionTag();
     showNewVersionPopup();
   } catch (e) {
     // offline / request hiccup — just try again next interval
@@ -198,6 +258,7 @@ async function pollForNewVersion() {
 }
 
 checkNewVersion();
+updatePatchNotesVersionTag();
 setInterval(pollForNewVersion, VERSION_POLL_INTERVAL_MS);
 
 // Browsers heavily throttle setInterval in a BACKGROUND tab — exactly the
@@ -223,6 +284,22 @@ $("new-version-overlay").addEventListener("click", (e) => {
   if (e.target.id === "new-version-overlay") {
     $("new-version-overlay").classList.add("hidden");
     stopNewVersionCountdown();
+  }
+});
+
+// Full patch history overlay (the "Patch Notes" button next to the title) —
+// independent of auth state, same as the rest of this section, since it's
+// just static content from window.PATCH_NOTES.
+$("btn-patch-notes")?.addEventListener("click", () => {
+  renderPatchNotesHistory();
+  $("patch-notes-overlay")?.classList.remove("hidden");
+});
+$("btn-close-patch-notes-overlay")?.addEventListener("click", () => {
+  $("patch-notes-overlay")?.classList.add("hidden");
+});
+$("patch-notes-overlay")?.addEventListener("click", (e) => {
+  if (e.target.id === "patch-notes-overlay") {
+    $("patch-notes-overlay")?.classList.add("hidden");
   }
 });
 
@@ -453,7 +530,7 @@ async function enterGame(user) {
   await loadChatHistory("global");
   subscribeChat("global");
   subscribeWhispers();
-  await doTick(); // resolve any offline progress immediately
+  await doTick({ isInitial: true }); // resolve any offline progress immediately
   resetTickBar();
 
   clearInterval(state.tickTimer);
@@ -950,10 +1027,52 @@ function renderInventory(rows) {
   });
 }
 
-async function doTick() {
+// Below this, an "away" gap is worth interrupting login with a summary for
+// -- shorter than this (e.g. just reloading the page while already
+// playing, which still runs perform_idle_tick() and can still report a few
+// seconds' worth of elapsed_seconds/xp/gold) stays silent instead of
+// popping up a "you earned 4 xp" summary on every refresh.
+const WELCOME_BACK_MIN_SECONDS = 60;
+
+// "3h 12m" / "45m" / "38s" -- whichever units are actually relevant, most
+// significant first, at most two of them (a precise seconds count stops
+// mattering once you're into hours). elapsed_seconds is already an
+// integer (perform_idle_tick casts to bigint), so no rounding to worry
+// about here.
+function formatDuration(totalSeconds) {
+  const s = Math.max(0, Math.floor(totalSeconds));
+  const hours = Math.floor(s / 3600);
+  const mins = Math.floor((s % 3600) / 60);
+  const secs = s % 60;
+  if (hours > 0) return `${hours}h ${mins}m`;
+  if (mins > 0) return `${mins}m`;
+  return `${secs}s`;
+}
+
+// Shown once, right after login (see enterGame's doTick({ isInitial: true })
+// call) -- idleRow is perform_idle_tick()'s own return row, so xp_gained/
+// gold_gained/elapsed_seconds here are exactly what THIS ONE catch-up call
+// covered, not a running total. Never called from the periodic tick loop,
+// so it can never show up mid-session.
+function maybeShowWelcomeBackSummary(idleRow) {
+  if (!idleRow) return;
+  if (Number(idleRow.elapsed_seconds) < WELCOME_BACK_MIN_SECONDS) return;
+  const xp = Number(idleRow.xp_gained) || 0;
+  const gold = Number(idleRow.gold_gained) || 0;
+  if (xp <= 0 && gold <= 0) return; // nothing actually earned (e.g. a brand-new character's first load)
+
+  $("welcome-back-away-time").textContent = `You were away for ${formatDuration(idleRow.elapsed_seconds)}.`;
+  $("welcome-back-xp").textContent = xp.toLocaleString();
+  $("welcome-back-gold").textContent = gold.toLocaleString();
+  $("welcome-back-overlay")?.classList.remove("hidden");
+}
+
+async function doTick(opts = {}) {
   const { data, error } = await sb.rpc("perform_idle_tick");
   if (error) return console.error(error);
   const idleRow = data?.[0];
+
+  if (opts.isInitial) maybeShowWelcomeBackSummary(idleRow);
 
   // one auto-strike against the current pack per tick — costs 1 action,
   // stops gracefully once the pool is empty (see autoStrikeEnemy above)
@@ -971,6 +1090,18 @@ async function doTick() {
 
   if (strikeMsg) $("tick-log").textContent = strikeMsg;
 }
+
+$("btn-close-welcome-back-overlay")?.addEventListener("click", () => {
+  $("welcome-back-overlay")?.classList.add("hidden");
+});
+$("btn-welcome-back-continue")?.addEventListener("click", () => {
+  $("welcome-back-overlay")?.classList.add("hidden");
+});
+$("welcome-back-overlay")?.addEventListener("click", (e) => {
+  if (e.target.id === "welcome-back-overlay") {
+    $("welcome-back-overlay")?.classList.add("hidden");
+  }
+});
 
 $("btn-refresh-actions").addEventListener("click", async () => {
   const { error } = await sb.rpc("refresh_actions");
