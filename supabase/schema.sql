@@ -2066,6 +2066,6 @@ insert into class_defs (key, name, description, mods) values
     '{"crit_chance_flat": 10, "attack_pct": 10, "defense_pct": -5}'::jsonb),
   ('magi',    'Magi',    '+10% Multi Strike, +10% Crit, +5% Power, -20% Defense',
     '{"multi_strike_flat": 10, "crit_chance_flat": 10, "attack_pct": 5, "defense_pct": -20}'::jsonb),
-  ('striker', 'Striker', '+20% Multi Strike, -20% Crit, -10% Defense',
-    '{"multi_strike_flat": 20, "crit_chance_flat": -20, "defense_pct": -10}'::jsonb)
+  ('striker', 'Striker', '+20% Multi Strike, +20% Crit, -10% Defense',
+    '{"multi_strike_flat": 20, "crit_chance_flat": 20, "defense_pct": -10}'::jsonb)
 on conflict (key) do update set name = excluded.name, description = excluded.description, mods = excluded.mods;
