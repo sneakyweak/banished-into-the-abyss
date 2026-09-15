@@ -55,12 +55,15 @@ alter table profiles add column if not exists class text not null default 'warri
 alter table profiles alter column hp set default 10;
 alter table profiles alter column max_hp set default 10;
 
--- retroactively apply the new baseline to any EXISTING character still
--- sitting at the old untouched default. Scoped tightly to hp=100/max_hp=100
--- so it never touches a character that's already progressed past 100 max
--- hp via Banishment retention; safe to re-run since those rows no longer
--- match after the first pass.
-update profiles set hp = 10, max_hp = 10 where hp = 100 and max_hp = 100;
+-- retroactively apply the new baseline to any EXISTING character still at
+-- the old untouched max_hp default — gated on max_hp alone (not also
+-- hp = 100) since a character mid-fight or otherwise not at full hp would
+-- never have matched an hp = 100 check and would've been silently skipped.
+-- Full-heals to the new baseline, which is the point of a baseline reset.
+-- Never touches a character that's already progressed past 100 max hp via
+-- Banishment retention; safe to re-run since those rows no longer match
+-- after the first pass.
+update profiles set hp = 10, max_hp = 10 where max_hp = 100;
 
 -- rename the old "shards" column to "abyssal_prowess" (same values, clearer
 -- name now that it's the currency driving Banishment's retention tiers).
