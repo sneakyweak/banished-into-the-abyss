@@ -590,11 +590,11 @@ button:disabled { opacity: 0.4; cursor: not-allowed; }
 .battle-sub { font-size: 0.75rem; color: var(--dim); }
 
 /* The enemy pack: any number of member cards (1-30), laid out 2 per row —
-   icon on the left of each card, name/hp-bar/hp-text filling the rest —
-   so a full 30-enemy pack is 15 rows instead of 30. Collapses to a single
-   column below 480px, where two side-by-side cards would get too cramped
-   to read. A cleared member (hp 0) dims out rather than disappearing, so
-   the pack's original size stays visible mid-fight. */
+   each card is just name/hp-bar/hp-text (no mob art, deliberately -- see
+   DESIGN.md's premise) — so a full 30-enemy pack is 15 rows instead of 30.
+   Collapses to a single column below 480px, where two side-by-side cards
+   would get too cramped to read. A cleared member (hp 0) dims out rather
+   than disappearing, so the pack's original size stays visible mid-fight. */
 .battle-pack {
   display: grid;
   grid-template-columns: repeat(2, 1fr);
@@ -617,8 +617,9 @@ button:disabled { opacity: 0.4; cursor: not-allowed; }
   border-radius: 8px;
 }
 .pack-member-dead { opacity: 0.35; }
-/* Fills the row next to the art slot; text is left-aligned here since a
-   full-width row (unlike the old narrow column cards) has room for it. */
+/* Fills the whole card row -- no art slot beside it (see the .battle-pack
+   comment above); text is left-aligned here since a full-width row (unlike
+   the old narrow column cards) has room for it. */
 .pack-member-info {
   flex: 1 1 auto;
   min-width: 0;
@@ -628,49 +629,6 @@ button:disabled { opacity: 0.4; cursor: not-allowed; }
 }
 .pack-member-info .battle-name { text-align: left; }
 
-/* Placeholder mob-art slot — one per pack member. Swap
-   .battle-mob-placeholder-icon for an <img> with object-fit: cover once
-   real per-enemy artwork exists; the slot's size/border stays the same. */
-.battle-mob-slot {
-  width: 64px;
-  height: 64px;
-  flex: 0 0 auto;
-  border: 1px dashed var(--border);
-  border-radius: 8px;
-  background: #0c0a10;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-}
-/* Smaller than the player's slot so a long vertical list of rows stays
-   compact — the player card above still uses the full 64px size. */
-.pack-mob-slot {
-  width: 48px;
-  height: 48px;
-}
-.battle-mob-placeholder-icon {
-  font-size: 1.4rem;
-  color: var(--dim);
-  opacity: 0.6;
-}
-.battle-mob-slot-img {
-  width: 100%;
-  height: 100%;
-  object-fit: cover;
-  object-position: top;
-  border-radius: 7px;
-  display: block;
-}
-/* Player side no longer shows a portrait here (redundant with the avatar
-   already on screen elsewhere) -- visibility:hidden keeps the same box
-   dimensions reserved (so the name/HP bar below still lines up with the
-   enemy pack's cards, which DO keep their art slot) without drawing the
-   dashed border/background a real slot has. */
-.battle-mob-slot-spacer {
-  border-color: transparent;
-  background: transparent;
-  visibility: hidden;
-}
 .battle-side .hp-bar,
 .pack-member-info .hp-bar { width: 100%; }
 .battle-hp-text { font-size: 0.75rem; color: var(--dim); }

@@ -220,12 +220,6 @@
           <p id="daily-totals-summary" class="log battle-stats-summary"></p>
           <div class="battle-arena">
             <div class="battle-side battle-player">
-              <!-- No player portrait here (it's already shown elsewhere on
-                   the page) -- but an invisible spacer the same size as the
-                   enemy pack's art slot is kept so both sides' name/HP bar
-                   still start at the same height instead of the player's
-                   column sitting higher up with nothing above the name. -->
-              <div class="battle-mob-slot battle-mob-slot-spacer" aria-hidden="true"></div>
               <div class="battle-name" id="battle-player-name">—</div>
               <div class="battle-sub">Lv <span id="battle-player-level">1</span></div>
               <div class="hp-bar"><div id="player-hp-fill" class="hp-fill hp-fill-player"></div></div>
@@ -233,9 +227,9 @@
             </div>
             <!-- The enemy pack (1-30 members, per the Number of Enemies
                  Spawned dropdown below) — rendered by app.js's renderPack(),
-                 2 per row so any pack size reads clearly. Each member row
-                 gets its own placeholder art slot; swap for a real <img>
-                 per enemy_key once mob art exists. -->
+                 2 per row so any pack size reads clearly. Text-only cards
+                 (name/hp-bar/hp-text) -- no mob art slot, deliberately (see
+                 DESIGN.md's premise: text/UI presentation, no game art). -->
             <div class="battle-pack" id="battle-pack"></div>
           </div>
           <!-- Active affixes (enemy-side) / debuffs (player-side, self-imposed)
@@ -516,14 +510,8 @@
        0.100) if the player explicitly asks for a bigger jump for that
        round. -->
   <script>
-    window.APP_VERSION = "0.009";
+    window.APP_VERSION = "0.008";
     window.PATCH_NOTES = [
-      {
-        "version": "0.009",
-        "notes": [
-          "Gloomfly now has real artwork in the Current Battle panel instead of the placeholder icon -- the first of the 100-strong roster to get one."
-        ]
-      },
       {
         "version": "0.008",
         "notes": [
