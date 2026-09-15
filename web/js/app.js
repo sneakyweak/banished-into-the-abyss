@@ -349,6 +349,16 @@ const CLASS_PORTRAITS = {
   magi: "img/class-magi-avatar.jpg",
   striker: "img/class-striker-avatar.jpg",
 };
+// Per-enemy art, keyed by enemies.key (see the "enemy_key" field inside
+// each pack member -- schema.sql's roll_pack()). Deliberately sparse: only
+// a handful of the 100-strong roster (see schema.sql's enemies seed data)
+// have real art commissioned so far. renderPack() below falls back to the
+// existing "?" placeholder slot for every enemy_key not listed here, so
+// adding art for one more mob is just adding one more line, no other
+// code changes needed.
+const ENEMY_ART = {
+  void_wisp_gloomfly: "img/enemy-void_wisp_gloomfly.jpg",
+};
 // Mirrors class_defs.mods in schema.sql exactly (see that seed data's
 // comment for the design rationale) -- kept in sync by hand, same as the
 // class-bonus text already hardcoded on the class-select cards in
@@ -777,11 +787,11 @@ async function loadPack() {
 }
 
 // Renders the whole pack side of the arena as one card per member — a
-// left-hand placeholder art slot (swap for a real <img> per enemy_key once
-// mob art exists) plus a name/hp-bar/hp-text block filling the rest of the
-// card's width. Laid out 2 per row (see .battle-pack/.pack-member in
-// style.css) so a full pack takes half as many rows as one-per-row would.
-// Built with
+// left-hand art slot (a real <img> for the handful of enemy_keys in
+// ENEMY_ART above, the "?" placeholder for everything else) plus a
+// name/hp-bar/hp-text block filling the rest of the card's width. Laid out
+// 2 per row (see .battle-pack/.pack-member in style.css) so a full pack
+// takes half as many rows as one-per-row would. Built with
 // textContent/DOM nodes rather than innerHTML+template strings since enemy
 // names, while server-controlled today, shouldn't need an escaping audit
 // later just because this function got reused for something less trusted.
@@ -796,10 +806,19 @@ function renderPack(pack) {
 
     const slot = document.createElement("div");
     slot.className = "battle-mob-slot pack-mob-slot";
-    const icon = document.createElement("span");
-    icon.className = "battle-mob-placeholder-icon";
-    icon.textContent = "?";
-    slot.appendChild(icon);
+    const artSrc = ENEMY_ART[enemy.enemy_key];
+    if (artSrc) {
+      const art = document.createElement("img");
+      art.className = "battle-mob-slot-img";
+      art.src = artSrc;
+      art.alt = enemy.name || "";
+      slot.appendChild(art);
+    } else {
+      const icon = document.createElement("span");
+      icon.className = "battle-mob-placeholder-icon";
+      icon.textContent = "?";
+      slot.appendChild(icon);
+    }
     card.appendChild(slot);
 
     const info = document.createElement("div");
