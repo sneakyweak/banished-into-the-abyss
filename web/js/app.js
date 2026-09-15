@@ -42,6 +42,7 @@ const $ = (id) => document.getElementById(id);
 const SEEN_VERSION_KEY = "bita_seen_version";
 const NEW_VERSION_REFRESH_SECONDS = 120; // 2 minutes — long enough to actually read the patch notes before it forces a refresh
 let newVersionCountdownTimer = null;
+let newVersionDeadline = null; // wall-clock ms timestamp; set while the countdown is active
 
 function checkNewVersion() {
   const current = window.APP_VERSION;
@@ -72,11 +73,19 @@ function showNewVersionPopup() {
   startNewVersionCountdown();
 }
 
+// Wall-clock-deadline based (NOT a decrementing tick counter) — a
+// background tab's setInterval gets throttled and can fire a burst of
+// catch-up ticks all at once when the tab becomes visible again, which is
+// what made the old tick-counting version "close way too soon" (a chunk of
+// the countdown silently elapsed off-screen). Comparing against a fixed
+// Date.now() deadline means the displayed time is always accurate no
+// matter how irregularly the interval actually fires.
 function startNewVersionCountdown() {
-  let remaining = NEW_VERSION_REFRESH_SECONDS;
+  newVersionDeadline = Date.now() + NEW_VERSION_REFRESH_SECONDS * 1000;
   const label = $("new-version-countdown");
   const render = () => {
-    if (!label) return;
+    if (!label || newVersionDeadline == null) return;
+    const remaining = Math.max(0, Math.round((newVersionDeadline - Date.now()) / 1000));
     const mins = Math.floor(remaining / 60);
     const secs = remaining % 60;
     const timeStr = `${mins}:${String(secs).padStart(2, "0")}`;
@@ -85,19 +94,29 @@ function startNewVersionCountdown() {
   render();
   clearInterval(newVersionCountdownTimer);
   newVersionCountdownTimer = setInterval(() => {
-    remaining -= 1;
-    if (remaining <= 0) {
-      clearInterval(newVersionCountdownTimer);
-      location.reload();
-      return;
-    }
     render();
+    maybeReloadForNewVersion();
   }, 1000);
+}
+
+// Only actually reloads once the deadline has passed AND the tab is
+// visible — so a reload can never happen (or appear to happen) while
+// nobody's looking at it. Also called from visibilitychange so a deadline
+// that passed while the tab was hidden triggers the reload the instant
+// someone tabs back in, rather than waiting on a throttled interval tick.
+function maybeReloadForNewVersion() {
+  if (newVersionDeadline == null) return;
+  if (Date.now() < newVersionDeadline) return;
+  if (document.visibilityState !== "visible") return;
+  clearInterval(newVersionCountdownTimer);
+  newVersionCountdownTimer = null;
+  location.reload();
 }
 
 function stopNewVersionCountdown() {
   clearInterval(newVersionCountdownTimer);
   newVersionCountdownTimer = null;
+  newVersionDeadline = null;
   const label = $("new-version-countdown");
   if (label) label.textContent = "";
 }
@@ -171,7 +190,10 @@ setInterval(pollForNewVersion, VERSION_POLL_INTERVAL_MS);
 // precisely the moment someone would actually be checking for the popup,
 // so poll right then too instead of waiting on the throttled interval.
 document.addEventListener("visibilitychange", () => {
-  if (document.visibilityState === "visible") pollForNewVersion();
+  if (document.visibilityState === "visible") {
+    pollForNewVersion();
+    maybeReloadForNewVersion();
+  }
 });
 
 $("btn-close-new-version-overlay").addEventListener("click", () => {
@@ -410,55 +432,6 @@ function renderEnemy() {
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-const COMBAT_LOG_MAX_LINES = 150;
-
-// Appends one pre-built HTML line to the scrolling combat log and trims it
-// to COMBAT_LOG_MAX_LINES so it can't grow unbounded over a long session.
-// The HTML comes only from describeRoundLines() below, built entirely from
-// server-supplied numbers/enums (never free text), so innerHTML is safe here.
-function appendCombatLine(html) {
-  const log = $("combat-log");
-  if (!log) return;
-  const line = document.createElement("div");
-  line.className = "combat-line";
-  line.innerHTML = html;
-  log.appendChild(line);
-  while (log.children.length > COMBAT_LOG_MAX_LINES) {
-    log.removeChild(log.firstChild);
-  }
-  log.scrollTop = log.scrollHeight;
-}
-
-// Turns one rounds_log entry (see strike_enemy in schema.sql) into one or
-// more readable combat-log lines: every individual blow this round (who hit
-// whom, how hard, crit/multi strike), plus a closing line if the round
-// ended in a kill or a death.
-function describeRoundLines(entry) {
-  const lines = [];
-  const enemyName = entry.enemy_name || "the enemy";
-  for (const hit of entry.hits || []) {
-    if (hit.source === "player") {
-      const tags = [];
-      if (hit.crit) tags.push('<span class="crit-tag">crit!</span>');
-      if (hit.multi_strike) tags.push('<span class="crit-tag">multi strike</span>');
-      const tagText = tags.length ? ` (${tags.join(", ")})` : "";
-      lines.push(`You hit ${enemyName} for <span class="dmg-out">${hit.dmg}</span>${tagText}`);
-    } else {
-      lines.push(`${enemyName} hits you for <span class="dmg-in">${hit.dmg}</span>`);
-    }
-  }
-  if (entry.event === "kill") {
-    let killLine = `<span class="kill-tag">${enemyName} is slain!</span>`;
-    if (entry.xp_gained || entry.gold_gained) {
-      killLine += ` +${entry.xp_gained || 0} xp, +${entry.gold_gained || 0} gold`;
-    }
-    lines.push(killLine);
-  } else if (entry.event === "death") {
-    lines.push(`<span class="death-tag">You were struck down!</span> Respawning...`);
-  }
-  return lines;
-}
-
 // Paints one moment of the Current Battle panel — both hp bars plus the
 // enemy name (which can change mid-playback: a kill/death respawns into a
 // freshly-rolled tier, e.g. "Test Rat" -> "Elite Test Rat"). Used both by
@@ -513,7 +486,6 @@ async function autoStrikeEnemy() {
     const eventDelayMs = log.length > 15 ? 200 : 350;
     for (const entry of log) {
       renderBattleHp(entry.enemy_name, entry.enemy_hp, entry.enemy_max_hp, entry.player_hp, entry.player_max_hp);
-      for (const line of describeRoundLines(entry)) appendCombatLine(line);
       await sleep(entry.event ? eventDelayMs : roundDelayMs);
     }
   }

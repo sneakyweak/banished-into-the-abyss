@@ -546,18 +546,7 @@ button:disabled { opacity: 0.4; cursor: not-allowed; }
 .chat-log .msg.system { color: var(--dim); font-style: italic; }
 .chat-log .msg.whisper { color: #f0c674; }
 
-.combat-log {
-  height: 150px; overflow-y: auto; background: #0c0a10;
-  border: 1px solid var(--border); border-radius: 4px; padding: 8px;
-  font-size: 0.78rem; text-align: left; display: flex; flex-direction: column; gap: 2px;
-  margin-top: 8px;
-}
-.combat-log .combat-line { color: var(--dim); }
-.combat-line .dmg-out { color: var(--good); font-weight: bold; }
-.combat-line .dmg-in { color: var(--danger); font-weight: bold; }
-.combat-line .crit-tag { color: #f0c674; font-weight: bold; }
-.combat-line .kill-tag { color: var(--accent-bright); font-weight: bold; }
-.combat-line .death-tag { color: var(--danger); font-weight: bold; }
+.battle-summary { margin-top: 2px; margin-bottom: 14px; min-height: 1.2em; }
 
 #chat-form { display: flex; gap: 8px; margin-top: 8px; }
 #chat-input {

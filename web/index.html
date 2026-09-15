@@ -133,11 +133,10 @@
               <div id="enemy-hp-text" class="battle-hp-text"></div>
             </div>
           </div>
+          <p id="tick-log" class="log battle-summary"></p>
 
           <div class="tick-bar"><div id="tick-bar-fill" class="tick-fill"></div></div>
           <button id="btn-refresh-actions">Refresh Actions (<span id="stat-actions">0</span>)</button>
-          <p id="tick-log" class="log"></p>
-          <div id="combat-log" class="combat-log"></div>
         </section>
 
         <section class="panel chat-panel">
@@ -295,9 +294,10 @@
        brand-new visitor never sees it — only a browser that previously
        stored a different version. -->
   <script>
-    window.APP_VERSION = "8";
+    window.APP_VERSION = "9";
     window.PATCH_NOTES = [
-      "Update notice now gives you 2 minutes to read the patch notes (was 10 seconds) and has a Refresh Now button.",
+      "Fixed the update popup's 2-minute countdown closing too early.",
+      "Removed the detailed combat log — battle results now show as a short summary under the battle portraits.",
     ];
   </script>
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js"></script>
