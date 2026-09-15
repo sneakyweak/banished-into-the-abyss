@@ -40,7 +40,7 @@ const $ = (id) => document.getElementById(id);
 // ---------------------------------------------------------------------------
 
 const SEEN_VERSION_KEY = "bita_seen_version";
-const NEW_VERSION_REFRESH_SECONDS = 10;
+const NEW_VERSION_REFRESH_SECONDS = 120; // 2 minutes — long enough to actually read the patch notes before it forces a refresh
 let newVersionCountdownTimer = null;
 
 function checkNewVersion() {
@@ -76,7 +76,11 @@ function startNewVersionCountdown() {
   let remaining = NEW_VERSION_REFRESH_SECONDS;
   const label = $("new-version-countdown");
   const render = () => {
-    if (label) label.textContent = `Refreshing in ${remaining}s...`;
+    if (!label) return;
+    const mins = Math.floor(remaining / 60);
+    const secs = remaining % 60;
+    const timeStr = `${mins}:${String(secs).padStart(2, "0")}`;
+    label.textContent = `There's a new patch — please refresh. Auto-refreshing in ${timeStr}...`;
   };
   render();
   clearInterval(newVersionCountdownTimer);
@@ -174,6 +178,7 @@ $("btn-close-new-version-overlay").addEventListener("click", () => {
   $("new-version-overlay").classList.add("hidden");
   stopNewVersionCountdown();
 });
+$("btn-refresh-now-version").addEventListener("click", () => location.reload());
 $("new-version-overlay").addEventListener("click", (e) => {
   if (e.target.id === "new-version-overlay") {
     $("new-version-overlay").classList.add("hidden");

@@ -283,6 +283,7 @@
       <div class="panel-divider"></div>
       <h3 class="panel-subtitle">Patch Notes</h3>
       <ul id="patch-notes-list" class="patch-notes-list"></ul>
+      <button id="btn-refresh-now-version">Refresh Now</button>
       <p id="new-version-countdown" class="log"></p>
     </div>
   </div>
@@ -294,9 +295,9 @@
        brand-new visitor never sees it — only a browser that previously
        stored a different version. -->
   <script>
-    window.APP_VERSION = "7";
+    window.APP_VERSION = "8";
     window.PATCH_NOTES = [
-      "Fixed the update notice not appearing while the game tab was in the background (browsers throttle background timers — it now also checks the instant you switch back to the tab).",
+      "Update notice now gives you 2 minutes to read the patch notes (was 10 seconds) and has a Refresh Now button.",
     ];
   </script>
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js"></script>
