@@ -285,8 +285,7 @@ function renderProfile() {
   $("stat-xp").textContent = p.xp;
   $("stat-gold").textContent = p.gold;
   $("stat-prowess").textContent = p.abyssal_prowess;
-  $("stat-actions").textContent = p.actions;
-  $("stat-max-actions").textContent = p.max_actions;
+  $("stat-actions").textContent = p.actions; // shown on the Refresh Actions button now — just the remaining count, no /max
 
   $("stat-power").textContent = p.attack;
   $("stat-defense").textContent = p.defense;
@@ -328,6 +327,55 @@ function renderEnemy() {
 }
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+const COMBAT_LOG_MAX_LINES = 150;
+
+// Appends one pre-built HTML line to the scrolling combat log and trims it
+// to COMBAT_LOG_MAX_LINES so it can't grow unbounded over a long session.
+// The HTML comes only from describeRoundLines() below, built entirely from
+// server-supplied numbers/enums (never free text), so innerHTML is safe here.
+function appendCombatLine(html) {
+  const log = $("combat-log");
+  if (!log) return;
+  const line = document.createElement("div");
+  line.className = "combat-line";
+  line.innerHTML = html;
+  log.appendChild(line);
+  while (log.children.length > COMBAT_LOG_MAX_LINES) {
+    log.removeChild(log.firstChild);
+  }
+  log.scrollTop = log.scrollHeight;
+}
+
+// Turns one rounds_log entry (see strike_enemy in schema.sql) into one or
+// more readable combat-log lines: every individual blow this round (who hit
+// whom, how hard, crit/multi strike), plus a closing line if the round
+// ended in a kill or a death.
+function describeRoundLines(entry) {
+  const lines = [];
+  const enemyName = entry.enemy_name || "the enemy";
+  for (const hit of entry.hits || []) {
+    if (hit.source === "player") {
+      const tags = [];
+      if (hit.crit) tags.push('<span class="crit-tag">crit!</span>');
+      if (hit.multi_strike) tags.push('<span class="crit-tag">multi strike</span>');
+      const tagText = tags.length ? ` (${tags.join(", ")})` : "";
+      lines.push(`You hit ${enemyName} for <span class="dmg-out">${hit.dmg}</span>${tagText}`);
+    } else {
+      lines.push(`${enemyName} hits you for <span class="dmg-in">${hit.dmg}</span>`);
+    }
+  }
+  if (entry.event === "kill") {
+    let killLine = `<span class="kill-tag">${enemyName} is slain!</span>`;
+    if (entry.xp_gained || entry.gold_gained) {
+      killLine += ` +${entry.xp_gained || 0} xp, +${entry.gold_gained || 0} gold`;
+    }
+    lines.push(killLine);
+  } else if (entry.event === "death") {
+    lines.push(`<span class="death-tag">You were struck down!</span> Respawning...`);
+  }
+  return lines;
+}
 
 // Paints one moment of the Current Battle panel — both hp bars plus the
 // enemy name (which can change mid-playback: a kill/death respawns into a
@@ -383,6 +431,7 @@ async function autoStrikeEnemy() {
     const eventDelayMs = log.length > 15 ? 200 : 350;
     for (const entry of log) {
       renderBattleHp(entry.enemy_name, entry.enemy_hp, entry.enemy_max_hp, entry.player_hp, entry.player_max_hp);
+      for (const line of describeRoundLines(entry)) appendCombatLine(line);
       await sleep(entry.event ? eventDelayMs : roundDelayMs);
     }
   }

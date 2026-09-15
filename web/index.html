@@ -98,7 +98,6 @@
             <li><span class="stat-label">Experience</span><span id="stat-xp">0</span></li>
             <li><span class="stat-label">Gold</span><span id="stat-gold">0</span></li>
             <li><span class="stat-label">Abyssal Prowess</span><span id="stat-prowess">0</span></li>
-            <li><span class="stat-label">Actions</span><span><span id="stat-actions">0</span>/<span id="stat-max-actions">0</span></span></li>
           </ul>
         </aside>
 
@@ -138,8 +137,9 @@
           </div>
 
           <div class="tick-bar"><div id="tick-bar-fill" class="tick-fill"></div></div>
-          <button id="btn-refresh-actions">Refresh Actions</button>
+          <button id="btn-refresh-actions">Refresh Actions (<span id="stat-actions">0</span>)</button>
           <p id="tick-log" class="log"></p>
+          <div id="combat-log" class="combat-log"></div>
         </section>
 
         <section class="panel chat-panel">
@@ -296,11 +296,10 @@
        brand-new visitor never sees it — only a browser that previously
        stored a different version. -->
   <script>
-    window.APP_VERSION = "3";
+    window.APP_VERSION = "4";
     window.PATCH_NOTES = [
-      "Combat now plays back round-by-round, so the hp bars actually show who's taking damage instead of jumping straight to the end result.",
-      "Current Battle panel title is now centered.",
-      "Chat moved directly under the Current Battle panel.",
+      "Added a live combat log — see exactly who hit whom, for how much, and whether it was a crit or multi strike.",
+      "Actions counter moved off the sidebar and onto the Refresh Actions button.",
     ];
   </script>
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js"></script>

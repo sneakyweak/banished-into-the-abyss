@@ -698,6 +698,7 @@ declare
   rounds_hard_cap int := 25;   -- absolute ceiling across the whole call so this can never hang
   rounds_run int := 0;
   hit_dmg int;
+  was_crit boolean;
   cur_enemy_hp int;
   cur_enemy_max_hp int;
   cur_tier text;
@@ -715,7 +716,11 @@ declare
   -- that end-state snapshot is what made the hp bars look like they were
   -- never taking damage. Each entry reflects hp right after that round's
   -- blows, BEFORE any kill/death respawn resets things for the next battle.
+  -- "hits" carries every individual blow landed THIS round (source,
+  -- damage, crit, multi_strike) so the client can render real combat text
+  -- ("you hit for 5, crit!") instead of just an end-of-fight summary.
   round_log jsonb := '[]'::jsonb;
+  round_hits jsonb;
 begin
   select * into p from profiles where id = auth.uid() for update;
   if not found then raise exception 'no profile'; end if;
@@ -762,20 +767,29 @@ begin
     loop
       exit battles when rounds_run >= rounds_hard_cap; -- absolute safety valve, even mid-battle
       rounds_run := rounds_run + 1;
+      round_hits := '[]'::jsonb;
 
       -- player's swing: Power vs. the enemy's (tier-scaled) Defense, with a
       -- Crit chance to double it
       hit_dmg := greatest(1, p.attack - stats.eff_defense);
-      if random() < (p.crit / 100.0) then hit_dmg := hit_dmg * 2; end if;
+      was_crit := random() < (p.crit / 100.0);
+      if was_crit then hit_dmg := hit_dmg * 2; end if;
       cur_enemy_hp := greatest(0, cur_enemy_hp - hit_dmg);
       total_damage := total_damage + hit_dmg;
+      round_hits := round_hits || jsonb_build_array(jsonb_build_object(
+        'source', 'player', 'dmg', hit_dmg, 'crit', was_crit, 'multi_strike', false
+      ));
 
       -- Multi Strike: a chance of a second swing landing in the same round
       if cur_enemy_hp > 0 and random() < (p.multi_strike / 100.0) then
         hit_dmg := greatest(1, p.attack - stats.eff_defense);
-        if random() < (p.crit / 100.0) then hit_dmg := hit_dmg * 2; end if;
+        was_crit := random() < (p.crit / 100.0);
+        if was_crit then hit_dmg := hit_dmg * 2; end if;
         cur_enemy_hp := greatest(0, cur_enemy_hp - hit_dmg);
         total_damage := total_damage + hit_dmg;
+        round_hits := round_hits || jsonb_build_array(jsonb_build_object(
+          'source', 'player', 'dmg', hit_dmg, 'crit', was_crit, 'multi_strike', true
+        ));
       end if;
 
       if cur_enemy_hp <= 0 then
@@ -787,8 +801,10 @@ begin
         -- Log this round against the enemy that was actually just fought
         -- (name/max hp before it gets replaced by the next spawn below).
         round_log := round_log || jsonb_build_array(jsonb_build_object(
+          'hits', round_hits,
           'enemy_hp', 0, 'enemy_max_hp', cur_enemy_max_hp, 'enemy_name', cur_enemy_name,
-          'player_hp', cur_player_hp, 'player_max_hp', p.max_hp, 'event', 'kill'
+          'player_hp', cur_player_hp, 'player_max_hp', p.max_hp, 'event', 'kill',
+          'xp_gained', stats.eff_xp, 'gold_gained', stats.eff_gold
         ));
 
         total_kills := total_kills + 1;
@@ -804,11 +820,16 @@ begin
       end if;
 
       -- enemy's counter-swing: its (tier-scaled) Attack vs. the player's Defense
-      cur_player_hp := greatest(0, cur_player_hp - greatest(1, stats.eff_attack - p.defense));
+      hit_dmg := greatest(1, stats.eff_attack - p.defense);
+      cur_player_hp := greatest(0, cur_player_hp - hit_dmg);
+      round_hits := round_hits || jsonb_build_array(jsonb_build_object(
+        'source', 'enemy', 'dmg', hit_dmg, 'crit', false, 'multi_strike', false
+      ));
       if cur_player_hp <= 0 then
         -- battle resolved: the player died — still no real penalty (TUNE),
         -- but it's a tracked, reported outcome now, not a silent reset
         round_log := round_log || jsonb_build_array(jsonb_build_object(
+          'hits', round_hits,
           'enemy_hp', cur_enemy_hp, 'enemy_max_hp', cur_enemy_max_hp, 'enemy_name', cur_enemy_name,
           'player_hp', 0, 'player_max_hp', p.max_hp, 'event', 'death'
         ));
@@ -827,6 +848,7 @@ begin
       -- an ordinary round: both sides still standing, both hp values carry
       -- straight into the next round with no respawn involved.
       round_log := round_log || jsonb_build_array(jsonb_build_object(
+        'hits', round_hits,
         'enemy_hp', cur_enemy_hp, 'enemy_max_hp', cur_enemy_max_hp, 'enemy_name', cur_enemy_name,
         'player_hp', cur_player_hp, 'player_max_hp', p.max_hp, 'event', null
       ));
