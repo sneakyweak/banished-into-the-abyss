@@ -583,6 +583,18 @@ button:disabled { opacity: 0.4; cursor: not-allowed; }
 .item-popup-meta { color: var(--dim); font-size: 0.7rem; margin-bottom: 6px; }
 .item-popup-stats { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
 .item-popup-footer { margin-top: 6px; padding-top: 6px; border-top: 1px dotted var(--border); color: var(--dim); font-size: 0.7rem; }
+/* "vs equipped" comparison, shown on bag-row popups only (see
+   buildComparisonSection() in app.js) -- a separate dotted-border block
+   under the item's own stat list, since it's a distinct piece of info (what
+   changes if you equip this) rather than more of the item's own stats. */
+.item-popup-compare { margin-top: 6px; padding-top: 6px; border-top: 1px dotted var(--border); }
+.item-popup-compare-heading { color: var(--dim); font-size: 0.7rem; margin-bottom: 2px; }
+.item-popup-compare-heading:not(:first-child) { margin-top: 6px; }
+.item-popup-compare-note { color: var(--dim); font-size: 0.72rem; }
+.item-popup-diff { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
+.item-popup-diff-pos { color: var(--good); }
+.item-popup-diff-neg { color: var(--danger); }
+.item-popup-diff-neutral { color: var(--dim); }
 
 /* Battle panel */
 

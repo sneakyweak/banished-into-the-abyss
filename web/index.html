@@ -567,8 +567,15 @@
        0.100) if the player explicitly asks for a bigger jump for that
        round. -->
   <script>
-    window.APP_VERSION = "0.012";
+    window.APP_VERSION = "0.013";
     window.PATCH_NOTES = [
+      {
+        "version": "0.013",
+        "notes": [
+          "Item popups on bag gear now compare against whatever you already have equipped in that slot -- each stat that would change shows as a gain (green) or a loss (red), so you can see if a drop is actually an upgrade before you equip it.",
+          "Rings and Relics have two equip slots, so a bag ring/relic compares against both pieces you have equipped, side by side."
+        ]
+      },
       {
         "version": "0.012",
         "notes": [

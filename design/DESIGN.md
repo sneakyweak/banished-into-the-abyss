@@ -119,6 +119,8 @@ Every scrap path — this cap overflow, the player's own standing rarity setting
 
 **Item popup.** Hovering (desktop) or tapping (mobile — there's no hover, so a first tap previews and, on an equip-slot box, a second tap confirms the unequip) any equip-slot box or bag row shows a small popup with the item's full name, rarity, slot, level, and complete stat list. One shared popup element, positioned near whatever triggered it — see `showItemPopup()`/`attachItemPopup()` in `app.js`.
 
+A bag row's popup additionally shows a "vs equipped" comparison against whatever's currently equipped in that same slot: one stat-delta line per stat that differs (green for a gain, red for a loss), covering stats the candidate item lacks but the equipped one has (shown as a loss) and vice versa, not just stats both share. Ring and Relic each have two equip slots, so a bag ring/relic compares against both equipped pieces separately, each under its own "vs `<name>`" heading; Helm/Weapon/Garb (one slot) just get a single "vs equipped" block. If nothing's equipped in that slot yet, the popup says so instead of showing a diff. An equip-slot box's own popup never shows this section — comparing an equipped item to itself is meaningless. See `buildComparisonSection()`/`computeStatDiffLines()` in `app.js`.
+
 ## 4. Guilds & guild bosses
 
 - Guilds: name + tag, leader/officer/member roles, guild chat channel, member cap (recommend 20–30 given the 400-player ceiling — enough for ~15-20 guilds to exist).

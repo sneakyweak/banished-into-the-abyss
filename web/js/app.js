@@ -1231,7 +1231,15 @@ function renderInventoryPanel() {
       actions.appendChild(scrapBtn);
 
       li.appendChild(actions);
-      attachItemPopup(li, item);
+      // Bag rows get a "vs equipped" comparison in their popup -- equip-slot
+      // boxes above don't pass this (an equipped item compared to itself is
+      // meaningless). Ring/Relic can have up to 2 equipped at once, so this
+      // may be 0, 1, or 2 items; buildComparisonSection() below handles all
+      // three shapes.
+      const compareItems = state.equipment.filter(
+        (e) => e.equipped_at && e.slot === item.slot
+      );
+      attachItemPopup(li, item, null, null, compareItems);
       ul.appendChild(li);
     });
   });
@@ -1340,12 +1348,15 @@ $("btn-clean-bag")?.addEventListener("click", async () => {
 // toggles it open on mobile, where hover doesn't really exist -- a second
 // tap anywhere else on the page closes it (see the document click listener
 // below). Positioned near whichever element triggered it, flipped to stay
-// on-screen when it would otherwise overflow the viewport.
+// on-screen when it would otherwise overflow the viewport. Bag-row popups
+// additionally take a compareItems array (the currently-equipped item(s) in
+// that same slot) and render a "vs equipped" stat diff -- see
+// buildComparisonSection() below.
 // ---------------------------------------------------------------------------
 
 let popupOpenFor = null; // the element the popup is currently showing for, or null
 
-function buildItemPopupContent(item, footerText) {
+function buildItemPopupContent(item, footerText, compareItems) {
   const frag = document.createDocumentFragment();
 
   const title = document.createElement("div");
@@ -1374,6 +1385,9 @@ function buildItemPopupContent(item, footerText) {
   }
   frag.appendChild(statsList);
 
+  const compareSection = buildComparisonSection(item, compareItems);
+  if (compareSection) frag.appendChild(compareSection);
+
   if (footerText) {
     const footer = document.createElement("div");
     footer.className = "item-popup-footer";
@@ -1384,11 +1398,86 @@ function buildItemPopupContent(item, footerText) {
   return frag;
 }
 
-function showItemPopup(anchorEl, item, footerText) {
+// Per-stat delta (item's value minus compareItem's value) for every key
+// present in EITHER item's mods -- so a stat the candidate item lacks but
+// the equipped one has still shows up as a loss, not just silently omitted.
+// Zero-delta stats (same value on both, or neither has it) are dropped since
+// "no change" isn't worth a line. Sorted to match EQ_STAT_LABELS' own order
+// so the list reads the same way the plain stat list above it does.
+const EQ_STAT_ORDER = Object.keys(EQ_STAT_LABELS);
+function computeStatDiffLines(item, compareItem) {
+  const keys = new Set([
+    ...Object.keys(item.mods || {}),
+    ...Object.keys((compareItem && compareItem.mods) || {}),
+  ]);
+  const lines = [];
+  keys.forEach((key) => {
+    const a = (item.mods || {})[key] || 0;
+    const b = (compareItem && compareItem.mods && compareItem.mods[key]) || 0;
+    const delta = a - b;
+    if (delta === 0) return;
+    const label = EQ_STAT_LABELS[key] || key;
+    const suffix = key.endsWith("_pct") ? "%" : "";
+    const sign = delta > 0 ? "+" : "";
+    lines.push({ key, delta, text: `${label} ${sign}${delta}${suffix}` });
+  });
+  lines.sort((x, y) => EQ_STAT_ORDER.indexOf(x.key) - EQ_STAT_ORDER.indexOf(y.key));
+  return lines;
+}
+
+// compareItems is undefined for popups where a comparison doesn't make sense
+// (an equip-slot box's own equipped item, compared to itself, is always all
+// zeroes) -- returns null in that case so buildItemPopupContent skips the
+// section entirely. Passed as [] (empty array, not undefined) from the bag
+// list when nothing is equipped in that slot yet, which still renders a
+// section -- just a "nothing equipped" note instead of a diff list. Ring and
+// Relic can have 2 equipped at once, so this may run once or twice.
+function buildComparisonSection(item, compareItems) {
+  if (!compareItems) return null;
+  const wrap = document.createElement("div");
+  wrap.className = "item-popup-compare";
+
+  if (!compareItems.length) {
+    const note = document.createElement("div");
+    note.className = "item-popup-compare-note";
+    note.textContent = "Nothing equipped in this slot -- pure upgrade.";
+    wrap.appendChild(note);
+    return wrap;
+  }
+
+  compareItems.forEach((compareItem) => {
+    const heading = document.createElement("div");
+    heading.className = "item-popup-compare-heading";
+    heading.textContent = compareItems.length > 1 ? `vs ${compareItem.name}` : "vs equipped";
+    wrap.appendChild(heading);
+
+    const lines = computeStatDiffLines(item, compareItem);
+    const list = document.createElement("ul");
+    list.className = "item-popup-diff";
+    if (!lines.length) {
+      const li = document.createElement("li");
+      li.className = "item-popup-diff-neutral";
+      li.textContent = "No change.";
+      list.appendChild(li);
+    } else {
+      lines.forEach(({ delta, text }) => {
+        const li = document.createElement("li");
+        li.className = delta > 0 ? "item-popup-diff-pos" : "item-popup-diff-neg";
+        li.textContent = text;
+        list.appendChild(li);
+      });
+    }
+    wrap.appendChild(list);
+  });
+
+  return wrap;
+}
+
+function showItemPopup(anchorEl, item, footerText, compareItems) {
   const popup = $("item-popup");
   if (!popup) return;
   popup.innerHTML = "";
-  popup.appendChild(buildItemPopupContent(item, footerText));
+  popup.appendChild(buildItemPopupContent(item, footerText, compareItems));
   popup.classList.remove("hidden");
   popupOpenFor = anchorEl;
 
@@ -1429,8 +1518,8 @@ function hideItemPopup() {
 // (no onActivate -- their Equip/Scrap buttons handle actions themselves,
 // already stopPropagation'd against this same listener) just toggle the
 // popup open on every tap, which is exactly "show me the stats."
-function attachItemPopup(el, item, footerText, onActivate) {
-  el.addEventListener("mouseenter", () => showItemPopup(el, item, footerText));
+function attachItemPopup(el, item, footerText, onActivate, compareItems) {
+  el.addEventListener("mouseenter", () => showItemPopup(el, item, footerText, compareItems));
   el.addEventListener("mouseleave", () => {
     if (popupOpenFor === el) hideItemPopup();
   });
@@ -1440,7 +1529,7 @@ function attachItemPopup(el, item, footerText, onActivate) {
       onActivate();
       return;
     }
-    showItemPopup(el, item, footerText);
+    showItemPopup(el, item, footerText, compareItems);
   });
 }
 
