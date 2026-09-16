@@ -1799,6 +1799,20 @@ declare
   rounds_soft_budget int;      -- once crossed, no NEW pack starts — but the current one still finishes
   rounds_hard_cap int := 25;   -- absolute ceiling across the whole call so this can never hang
   rounds_run int := 0;
+  -- Set true the instant this pack's fate is actually decided this call --
+  -- cleared, or the player died against it (both respawn points below, plus
+  -- the not-player-first death branch, all set it right before their own
+  -- exit exchanges;). If the round budget runs out with this still false,
+  -- the pack was neither cleared nor lost this tick -- the player picked
+  -- more than they could finish in one tick window, so instead of letting a
+  -- partially-damaged pack carry over into a later call (the old behavior),
+  -- the post-loop block below discards it and rolls a brand-new one with no
+  -- reward, matching "if a player picks too many mobs and doesn't clear it
+  -- in the tick window I want the pack to refresh with no bonus xp." A pack
+  -- that reaches the cleared branch is therefore now guaranteed to have been
+  -- cleared within a single tick window, which is what lets the xp-doubling
+  -- at that branch (see pack_xp below) apply unconditionally.
+  pack_outcome_resolved boolean := false;
   cur_pack jsonb;
   cur_player_hp int;
   cur_player_max_hp int;
@@ -2042,6 +2056,7 @@ begin
         select coalesce(sum(mod_val(mods, 'hp_pct')), 0) into hp_pct
           from affix_defs where key in (select jsonb_array_elements_text(new_affix_keys));
         cur_pack := apply_hp_mod(roll_pack(p.sel_pack_size, p.depth), hp_pct);
+        pack_outcome_resolved := true;
         exit exchanges;
       end if;
     end if;
@@ -2144,7 +2159,14 @@ begin
       -- xp_gain_pct (relic-only, see roll_loot() above): a straight bonus
       -- multiplier on top of reward_mult's difficulty-selection scaling --
       -- gold has no matching relic stat (yet), so pack_gold stays as-is.
-      pack_xp := round(pack_xp * reward_mult * (1 + mod_val(player_mods, 'xp_gain_pct') / 100.0));
+      -- Flat x2 on top of that: reaching this branch now means the WHOLE
+      -- selected pack died within this single tick window (see
+      -- pack_outcome_resolved's declaration above -- a partial clear can no
+      -- longer land here, it times out into the post-loop refresh instead),
+      -- so a same-window full clear always earns double xp, no conditional
+      -- needed at this site. Gold is deliberately left out of the doubling
+      -- -- the request was "double xp", not gold.
+      pack_xp := round(pack_xp * reward_mult * (1 + mod_val(player_mods, 'xp_gain_pct') / 100.0) * 2);
       pack_gold := round(pack_gold * reward_mult);
 
       -- No separate heal here anymore -- the kill that just cleared this
@@ -2202,6 +2224,7 @@ begin
       select coalesce(sum(mod_val(mods, 'hp_pct')), 0) into hp_pct
         from affix_defs where key in (select jsonb_array_elements_text(new_affix_keys));
       cur_pack := apply_hp_mod(roll_pack(p.sel_pack_size, p.depth), hp_pct);
+      pack_outcome_resolved := true;
       exit exchanges;
     end if;
 
@@ -2268,6 +2291,7 @@ begin
         select coalesce(sum(mod_val(mods, 'hp_pct')), 0) into hp_pct
           from affix_defs where key in (select jsonb_array_elements_text(new_affix_keys));
         cur_pack := apply_hp_mod(roll_pack(p.sel_pack_size, p.depth), hp_pct);
+        pack_outcome_resolved := true;
         exit exchanges;
       end if;
     end if;
@@ -2280,6 +2304,30 @@ begin
       ));
     end if;
   end loop exchanges;
+
+  -- Timed out: the round budget ran out (rounds_soft_budget or
+  -- rounds_hard_cap, see the loop's exit condition) with this pack neither
+  -- cleared nor having killed the player -- pack_outcome_resolved is still
+  -- false. The player selected more of a pack (sel_pack_size/affixes/
+  -- debuffs) than could be finished in this single tick window. Per request:
+  -- "if a player picks too many mobs and doesn't clear it in the tick
+  -- window I want the pack to refresh with no bonus xp" -- so this pack is
+  -- discarded (not carried into a later call at its partial hp, the old
+  -- behavior) and replaced with a freshly-rolled one, same reroll pattern as
+  -- every other respawn point above. No xp/gold is granted (there was no
+  -- kill event to grant it from) and cur_player_hp is deliberately left
+  -- untouched -- a timeout isn't a death, so no free heal either, otherwise
+  -- overshooting pack size would become a way to farm full heals for
+  -- nothing.
+  if not pack_outcome_resolved then
+    select coalesce(jsonb_agg(key), '[]'::jsonb) into new_affix_keys
+      from (select key from affix_defs order by random() limit greatest(0, p.sel_affix_count)) s;
+    select coalesce(jsonb_agg(key), '[]'::jsonb) into new_debuff_keys
+      from (select key from debuff_defs order by random() limit greatest(0, p.sel_debuff_count)) s;
+    select coalesce(sum(mod_val(mods, 'hp_pct')), 0) into hp_pct
+      from affix_defs where key in (select jsonb_array_elements_text(new_affix_keys));
+    cur_pack := apply_hp_mod(roll_pack(p.sel_pack_size, p.depth), hp_pct);
+  end if;
 
   res.cur_pack := cur_pack;
   res.new_affix_keys := new_affix_keys;
