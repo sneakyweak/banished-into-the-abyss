@@ -456,6 +456,20 @@
         <li><span class="stat-label">Retention This Banishment</span><span id="banish-pct">0.25%</span></li>
       </ul>
       <div class="panel-divider"></div>
+      <h3 class="panel-subtitle" data-tooltip="Exactly what banishing right now would do to your character -- computed the same way the server actually applies it, not just the flat retention percentage above.">What You'll Gain</h3>
+      <ul class="stat-list">
+        <li><span class="stat-label">Banishments (Depth)</span><span id="banish-gain-depth">0 → 1</span></li>
+        <li><span class="stat-label">Power carried forward</span><span id="banish-gain-attack">20</span></li>
+        <li><span class="stat-label">Defense carried forward</span><span id="banish-gain-defense">15</span></li>
+        <li><span class="stat-label">Max HP carried forward</span><span id="banish-gain-maxhp">75</span></li>
+      </ul>
+      <p class="log">
+        Everything else resets: Level back to 1, XP and Gold to 0, and all inventory/equipment cleared.
+        The stats above are the level-100 floor (20 Power / 15 Defense / 75 Max HP) plus your current
+        Banishment tier's cut of whatever you've grown past that floor -- the further past level 100
+        you push a life, the more this next life starts with.
+      </p>
+      <div class="panel-divider"></div>
       <div class="class-picker">
         <h3 class="panel-subtitle">Choose Your Class For The Next Life</h3>
         <div class="class-grid" id="banish-class-grid">
@@ -573,8 +587,14 @@
        0.100) if the player explicitly asks for a bigger jump for that
        round. -->
   <script>
-    window.APP_VERSION = "0.021";
+    window.APP_VERSION = "0.022";
     window.PATCH_NOTES = [
+      {
+        "version": "0.022",
+        "notes": [
+          "The Banishment screen now shows a \"What You'll Gain\" list with the actual numbers -- your new Banishment count and the exact Power/Defense/Max HP you'll carry into your next life -- instead of just an abstract retention percentage."
+        ]
+      },
       {
         "version": "0.021",
         "notes": [

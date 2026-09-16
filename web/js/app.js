@@ -2048,6 +2048,31 @@ function retentionPctForDepth(depth) {
   return 0.25;
 }
 
+// The level-100 floor perform_banishment() reads from level_stats(100) in
+// schema.sql (8 + 12*(99/99) = 20 attack, 6 + 9 = 15 defense, 30 + 45 = 75
+// max HP) -- mirrored by hand here, same spirit as BAG_CAP/CLASS_MODS/
+// RELIC_STAT_CAPS above, since this is a pure display preview and nothing
+// here is ever trusted for the real banishment (that's still entirely
+// server-side, unchanged).
+const BANISHMENT_BASE_STATS = { attack: 20, defense: 15, max_hp: 75 };
+
+// Mirrors perform_banishment()'s new_attack/new_defense/new_max_hp formula
+// EXACTLY (same floor, same floor() rounding, same greatest() clamp) so the
+// Banishment overlay can show the player the real numbers they'd actually
+// end up with, not just the abstract retention percentage -- added because
+// "Retention This Banishment: 0.25%" on its own doesn't tell a player
+// anything concrete about what they're about to get.
+function computeBanishmentGains(p) {
+  const retainPct = retentionPctForDepth(p.depth) / 100;
+  const gain = (base, current) => base + Math.floor((current - base) * retainPct);
+  return {
+    newDepth: p.depth + 1,
+    newAttack: Math.max(BANISHMENT_BASE_STATS.attack, gain(BANISHMENT_BASE_STATS.attack, p.attack)),
+    newDefense: Math.max(BANISHMENT_BASE_STATS.defense, gain(BANISHMENT_BASE_STATS.defense, p.defense)),
+    newMaxHp: Math.max(BANISHMENT_BASE_STATS.max_hp, gain(BANISHMENT_BASE_STATS.max_hp, p.max_hp)),
+  };
+}
+
 // Banish-overlay class picker — separate markup/selection from the
 // auth-screen one (#class-grid / state.selectedClass) so picking a class
 // here never touches signup state and vice versa. Defaults to the
@@ -2068,6 +2093,13 @@ function renderBanishOverlay() {
   $("banish-level").textContent = p.level;
   $("banish-depth").textContent = p.depth;
   $("banish-pct").textContent = `${retentionPctForDepth(p.depth)}%`;
+
+  const gains = computeBanishmentGains(p);
+  $("banish-gain-depth").textContent = `${p.depth} → ${gains.newDepth}`;
+  $("banish-gain-attack").textContent = gains.newAttack;
+  $("banish-gain-defense").textContent = gains.newDefense;
+  $("banish-gain-maxhp").textContent = gains.newMaxHp;
+
   const eligible = p.level >= 100;
   $("btn-perform-banish").disabled = !eligible;
   $("banish-lock-note").classList.toggle("hidden", eligible);
