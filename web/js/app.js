@@ -1121,6 +1121,7 @@ const EQ_STAT_LABELS = {
   life_steal_pct: "Life Steal", dodge_flat: "Dodge", block_flat: "Block", parry_flat: "Parry",
   riposte_flat: "Riposte", thorns_flat: "Thorns", bristle_back_pct: "Bristle Back", bleed_pct: "Bleed",
   abyssal_touch_flat: "Abyssal Touch", xp_gain_pct: "Increased XP", item_find_pct: "Increased Item Find",
+  aoe_damage_pct: "AOE Damage",
 };
 
 function formatEquipMods(mods) {
@@ -1137,22 +1138,26 @@ function formatEquipMods(mods) {
 // EQ_STAT_LABELS above.
 const BAG_CAP = 250;
 
-// The eleven relic-only stats from DESIGN.md §3a, in the same order as its
+// The twelve relic-only stats from DESIGN.md §3a, in the same order as its
 // table there -- drives both the Additional Affixes panel (Combat Stats
 // aside) below and, indirectly via EQ_STAT_LABELS, item tooltips/popups
 // elsewhere. Caps mirror what resolve_combat_action()/pack_counterattack()
 // actually enforce server-side in schema.sql (least(cap, ...) for each) --
 // display-only here, kept in sync by hand, same spirit as BAG_CAP above.
 // null means uncapped (Abyssal Touch, Thorns, Bristle Back, Increased XP,
-// Increased Item Find all have no ceiling server-side either).
+// Increased Item Find, and now AOE Damage all have no ceiling server-side
+// either -- AOE Damage in particular is DESIGNED to keep paying off however
+// far it's stacked past 100%, see its tooltip below).
 const RELIC_STAT_ORDER = [
   "dodge_flat", "block_flat", "parry_flat", "riposte_flat", "abyssal_touch_flat",
   "thorns_flat", "bristle_back_pct", "life_steal_pct", "bleed_pct", "xp_gain_pct", "item_find_pct",
+  "aoe_damage_pct",
 ];
 const RELIC_STAT_CAPS = {
   dodge_flat: 25, block_flat: 25, parry_flat: 25, riposte_flat: 25,
   abyssal_touch_flat: null, thorns_flat: null, bristle_back_pct: null,
   life_steal_pct: 50, bleed_pct: 25, xp_gain_pct: null, item_find_pct: null,
+  aoe_damage_pct: null,
 };
 // What each relic-only stat actually DOES (DESIGN.md §3a) -- every Combat
 // Stats row already gets one of these (Power/Defense/Crit/etc. in
@@ -1175,6 +1180,7 @@ const RELIC_STAT_TOOLTIPS = {
   bleed_pct: "Makes a target you hit bleed for a % of that hit's damage, ticking once per round for 3 rounds -- rolled at 1% per roll.",
   xp_gain_pct: "A straight multiplier on all XP gained -- combat kills and the passive idle trickle alike. Rolled at 2% per roll.",
   item_find_pct: "Boosts your loot drop roll on every pack clear. Rolled at 3% per roll.",
+  aoe_damage_pct: "Every full 100% splashes your hit onto one more enemy at the same time, for the same damage -- 250% means 2 guaranteed extra targets plus a 50% chance at a 3rd. Nothing is wasted between 100%s. Rolled at 15% per roll.",
 };
 
 // The "Additional Affixes" section of the Combat Stats panel -- every

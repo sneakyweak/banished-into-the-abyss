@@ -1480,6 +1480,145 @@ begin
 end;
 $$;
 
+-- resolve_player_hit(): ONE full player attack against the pack (target
+-- selection, damage, Abyssal Touch, Life Steal, Bleed, kill heal, and now
+-- AOE Damage splash) — pulled out of resolve_combat_action() into its own
+-- function because a single round can now call this more than once (the
+-- primary swing, plus however many Multi Strike bonus swings that round's
+-- Multi Strike total resolves to — see cur_multi_strike_guaranteed/
+-- cur_multi_strike_chance in resolve_combat_action()), and every one of
+-- those calls needs the exact same landed-hit handling, not a shrinking
+-- subset of it copy-pasted at each call site.
+--
+-- AOE Damage (new relic-only stat, aoe_damage_pct — see DESIGN.md §3a):
+-- splashes the SAME computed dmg_total (not a fresh attack roll — that's
+-- what makes it a cleave, distinct from Multi Strike, which rolls its own
+-- hit each time) onto additional still-alive targets. p_aoe_guaranteed
+-- (floor(aoe_damage_pct/100)) targets are hit for certain, plus one more
+-- with probability p_aoe_chance ((aoe_damage_pct mod 100)/100) — the same
+-- "every 100% = one more guaranteed application, the remainder is a chance
+-- for one more" convention Multi Strike itself now uses (see
+-- resolve_combat_action() below), so a relic-only splash stat and a
+-- standard combat stat both stop wasting anything rolled past a clean
+-- multiple of 100%. Target search cascades the same way Multi Strike's
+-- always has: the next still-alive member other than the one just hit, or
+-- back onto that same member if it's the last one standing. Every splash
+-- target gets the FULL landed-hit treatment (its own Life Steal tick, its
+-- own Bleed application, its own kill heal) — from that target's own
+-- perspective, it just took a perfectly ordinary hit.
+create or replace function resolve_player_hit(
+  p_pack jsonb,
+  p_attack numeric,
+  p_crit_chance numeric,
+  p_crit_damage numeric,
+  p_player_mods jsonb,
+  p_enemy_mods jsonb,
+  p_abyssal_touch numeric,
+  p_life_steal_pct numeric,
+  p_bleed_pct numeric,
+  p_bleed_duration_rounds int,
+  p_aoe_guaranteed int,
+  p_aoe_chance numeric,
+  p_cur_player_hp int,
+  p_cur_player_max_hp int,
+  p_multi_strike boolean default false
+)
+returns table (new_pack jsonb, new_player_hp int, hits jsonb, damage_dealt int, landed boolean)
+language plpgsql
+as $$
+declare
+  cur_pack jsonb := p_pack;
+  cur_player_hp int := p_cur_player_hp;
+  out_hits jsonb := '[]'::jsonb;
+  dmg_total int;
+  member jsonb;
+  target_idx int;
+  hit record;
+  total_dmg int := 0;
+  aoe_targets int;
+  i int;
+  splash_idx int;
+  did_land boolean := false;
+  -- Every index this swing has already landed on (primary target, then each
+  -- splash target as it's picked) -- BUGFIX during testing: the splash
+  -- search originally only ever excluded the PRIMARY target, so a second
+  -- (or third) splash could re-pick whatever the first splash just hit
+  -- instead of moving on to the next distinct member, wasting extra AOE
+  -- targets on a single already-hit enemy instead of actually spreading out.
+  already_hit int[];
+begin
+  select min(idx - 1) into target_idx
+    from jsonb_array_elements(cur_pack) with ordinality as t(elem, idx)
+    where (elem->>'hp')::int > 0;
+
+  if target_idx is not null then
+    did_land := true;
+    member := cur_pack -> target_idx;
+    select * into hit from compute_damage(p_attack, p_crit_chance, (member->>'defense')::numeric, p_player_mods, p_enemy_mods, p_crit_damage);
+    dmg_total := hit.dmg + round(p_abyssal_touch)::int;
+    cur_pack := jsonb_set(cur_pack, array[target_idx::text, 'hp'],
+      to_jsonb(greatest(0, (member->>'hp')::int - dmg_total)));
+    total_dmg := total_dmg + dmg_total;
+    out_hits := out_hits || jsonb_build_array(jsonb_build_object(
+      'source', 'player', 'target', target_idx, 'dmg', dmg_total, 'crit', hit.was_crit,
+      'multi_strike', p_multi_strike, 'cleave', false
+    ));
+    if p_life_steal_pct > 0 then
+      cur_player_hp := least(p_cur_player_max_hp, cur_player_hp + round(dmg_total * p_life_steal_pct / 100.0)::int);
+    end if;
+    if p_bleed_pct > 0 and (member->>'hp')::int - dmg_total > 0 then
+      cur_pack := jsonb_set(cur_pack, array[target_idx::text, 'bleed_dmg'], to_jsonb(round(dmg_total * p_bleed_pct / 100.0)::int));
+      cur_pack := jsonb_set(cur_pack, array[target_idx::text, 'bleed_rounds'], to_jsonb(p_bleed_duration_rounds));
+    end if;
+    if (member->>'hp')::int - dmg_total <= 0 then
+      cur_player_hp := p_cur_player_max_hp;
+    end if;
+    already_hit := array[target_idx];
+
+    aoe_targets := p_aoe_guaranteed + (case when p_aoe_chance > 0 and random() < p_aoe_chance then 1 else 0 end);
+    for i in 1..aoe_targets loop
+      select idx - 1 into splash_idx
+        from jsonb_array_elements(cur_pack) with ordinality as t(elem, idx)
+        where (elem->>'hp')::int > 0 and (idx - 1) != all(already_hit)
+        order by idx limit 1;
+      -- No fresh target left (every still-alive member has already taken a
+      -- hit THIS swing, primary or an earlier splash) — fall back to
+      -- re-hitting whichever target IS still alive, same "keep doing
+      -- something against a single-target pack" fallback Multi Strike's own
+      -- cascade already relies on.
+      if splash_idx is null then
+        select idx - 1 into splash_idx
+          from jsonb_array_elements(cur_pack) with ordinality as t(elem, idx)
+          where (elem->>'hp')::int > 0
+          order by idx limit 1;
+      end if;
+      exit when splash_idx is null; -- pack fully cleared mid-splash -- nothing left to cleave onto
+      already_hit := already_hit || splash_idx;
+      member := cur_pack -> splash_idx;
+      cur_pack := jsonb_set(cur_pack, array[splash_idx::text, 'hp'],
+        to_jsonb(greatest(0, (member->>'hp')::int - dmg_total)));
+      total_dmg := total_dmg + dmg_total;
+      out_hits := out_hits || jsonb_build_array(jsonb_build_object(
+        'source', 'player', 'target', splash_idx, 'dmg', dmg_total, 'crit', hit.was_crit,
+        'multi_strike', p_multi_strike, 'cleave', true
+      ));
+      if p_life_steal_pct > 0 then
+        cur_player_hp := least(p_cur_player_max_hp, cur_player_hp + round(dmg_total * p_life_steal_pct / 100.0)::int);
+      end if;
+      if p_bleed_pct > 0 and (member->>'hp')::int - dmg_total > 0 then
+        cur_pack := jsonb_set(cur_pack, array[splash_idx::text, 'bleed_dmg'], to_jsonb(round(dmg_total * p_bleed_pct / 100.0)::int));
+        cur_pack := jsonb_set(cur_pack, array[splash_idx::text, 'bleed_rounds'], to_jsonb(p_bleed_duration_rounds));
+      end if;
+      if (member->>'hp')::int - dmg_total <= 0 then
+        cur_player_hp := p_cur_player_max_hp;
+      end if;
+    end loop;
+  end if;
+
+  return query select cur_pack, cur_player_hp, out_hits, total_dmg, did_land;
+end;
+$$;
+
 -- Postgres can't CREATE OR REPLACE a function with a shorter parameter list
 -- — a project that already ran the old 4-arg (with p_bracket) version needs
 -- it dropped first. Safe no-op on a project that's never defined it.
@@ -1841,9 +1980,6 @@ declare
   enemy_mods jsonb;    -- merged from active affixes (applies pack-wide)
   hp_pct numeric;
   reward_mult numeric;
-  target_idx int;
-  member jsonb;
-  hit record;
   any_alive boolean;
   pack_xp int;
   pack_gold int;
@@ -1877,11 +2013,25 @@ declare
   cur_abyssal_touch numeric;
   bleed_duration_rounds int := 3; -- TUNE: rounds a Bleed application lasts
   bleed_tick_dmg int;
-  -- A landed player hit's damage AFTER Abyssal Touch's flat add -- every
-  -- place that used to read hit.dmg directly (pack hp reduction, total_damage,
-  -- the round log, the kill-heal check) now reads this instead, so Abyssal
-  -- Touch damage counts everywhere a normal hit's damage already did.
-  dmg_total int;
+  -- AOE Damage (new relic-only stat, see DESIGN.md §3a) and Multi Strike
+  -- (a STANDARD stat, but reworked alongside AOE below) now share the same
+  -- "every 100% = one more guaranteed application, the remainder is a
+  -- percent chance for one more" convention -- computed once here, same
+  -- "read before the round loop" treatment as cur_life_steal_pct etc above,
+  -- since neither total can change mid-call. Multi Strike used to be a
+  -- single chance-gated bonus swing that simply wasted anything rolled past
+  -- a 100% proc chance (guaranteed to fire once, never twice, no matter how
+  -- far past 100 the value climbed) -- BUGFIX/feature request: it no longer
+  -- does. See resolve_player_hit() (just above this function) for what
+  -- actually consumes these.
+  cur_aoe_pct numeric;
+  cur_aoe_guaranteed int;
+  cur_aoe_chance numeric;
+  cur_multi_strike_pct numeric;
+  cur_multi_strike_guaranteed int;
+  cur_multi_strike_chance numeric;
+  swing record;   -- one resolve_player_hit() call's result -- read fresh at every call site below
+  ms_i int;       -- Multi Strike's guaranteed-swings loop counter
   -- Whatever affixes/debuffs the pack we're CURRENTLY fighting rolled with,
   -- carried forward unchanged by default. Every mid-tick respawn point below
   -- (pack cleared, or either death branch) reassigns these to a brand-new
@@ -1956,6 +2106,23 @@ begin
   cur_life_steal_pct := least(50, greatest(0, mod_val(player_mods, 'life_steal_pct')));
   cur_bleed_pct := least(25, greatest(0, mod_val(player_mods, 'bleed_pct')));
   cur_abyssal_touch := greatest(0, mod_val(player_mods, 'abyssal_touch_flat'));
+
+  -- AOE Damage: uncapped, same "no ceiling" treatment as Abyssal Touch/
+  -- Thorns/Increased XP/Increased Item Find above -- the whole point of the
+  -- "every 100% = another target" design is that it keeps paying off
+  -- however far it's stacked, not that it caps out like the four
+  -- percent-capped relic stats do.
+  cur_aoe_pct := greatest(0, mod_val(player_mods, 'aoe_damage_pct'));
+  cur_aoe_guaranteed := floor(cur_aoe_pct / 100)::int;
+  cur_aoe_chance := (cur_aoe_pct - cur_aoe_guaranteed * 100) / 100.0;
+
+  -- Multi Strike: also uncapped (it always has been -- p.multi_strike plus
+  -- multi_strike_flat from class/gear/relics), just no longer WASTED past
+  -- 100%. See resolve_player_hit()'s comment for how cur_multi_strike_guaranteed/
+  -- cur_multi_strike_chance actually get consumed.
+  cur_multi_strike_pct := greatest(0, p.multi_strike + mod_val(player_mods, 'multi_strike_flat'));
+  cur_multi_strike_guaranteed := floor(cur_multi_strike_pct / 100)::int;
+  cur_multi_strike_chance := (cur_multi_strike_pct - cur_multi_strike_guaranteed * 100) / 100.0;
 
   cur_pack := p_cur_pack;
   -- a self-imposed hp_pct debuff temporarily lowers the player's effective
@@ -2061,90 +2228,55 @@ begin
       end if;
     end if;
 
-    -- player's primary swing: targets the first still-alive pack member
-    select min(idx - 1) into target_idx
-      from jsonb_array_elements(cur_pack) with ordinality as t(elem, idx)
-      where (elem->>'hp')::int > 0;
+    -- player's primary swing, then any Multi Strike bonus swings -- both go
+    -- through resolve_player_hit() now (see its own comment just above
+    -- resolve_combat_action() in this file) so Abyssal Touch/Life Steal/
+    -- Bleed/kill-heal/AOE Damage splash apply identically to every one of
+    -- them, not just the first.
+    select * into swing from resolve_player_hit(
+      cur_pack, p.attack, p.crit, p.crit_damage, player_mods, enemy_mods,
+      cur_abyssal_touch, cur_life_steal_pct, cur_bleed_pct, bleed_duration_rounds,
+      cur_aoe_guaranteed, cur_aoe_chance, cur_player_hp, cur_player_max_hp, false
+    );
+    if swing.landed then
+      cur_pack := swing.new_pack;
+      cur_player_hp := swing.new_player_hp;
+      round_hits := round_hits || swing.hits;
+      total_damage := total_damage + swing.damage_dealt;
+    end if;
 
-    if target_idx is not null then
-      member := cur_pack -> target_idx;
-      select * into hit from compute_damage(p.attack, p.crit, (member->>'defense')::numeric, player_mods, enemy_mods, p.crit_damage);
-      -- Abyssal Touch: a flat, always-on bonus added to every landed hit
-      -- (see cur_abyssal_touch above) -- applied AFTER compute_damage's own
-      -- crit/mitigation math so it's a flat add, never itself inflated by
-      -- a crit roll. dmg_total replaces hit.dmg everywhere below (pack hp
-      -- reduction, total_damage, the round log, the kill-heal check) so
-      -- Abyssal Touch damage counts everywhere a normal hit's already did.
-      dmg_total := hit.dmg + round(cur_abyssal_touch)::int;
-      cur_pack := jsonb_set(cur_pack, array[target_idx::text, 'hp'],
-        to_jsonb(greatest(0, (member->>'hp')::int - dmg_total)));
-      total_damage := total_damage + dmg_total;
-      round_hits := round_hits || jsonb_build_array(jsonb_build_object(
-        'source', 'player', 'target', target_idx, 'dmg', dmg_total, 'crit', hit.was_crit, 'multi_strike', false
-      ));
-
-      -- Life Steal and Bleed are deterministic per-hit magnitudes, not
-      -- chance rolls (unlike Dodge/Block/Parry/Riposte in
-      -- pack_counterattack()) -- every landed hit applies them, scaled by
-      -- the stat's own capped value. See cur_life_steal_pct/cur_bleed_pct
-      -- above.
-      if cur_life_steal_pct > 0 then
-        cur_player_hp := least(cur_player_max_hp, cur_player_hp + round(dmg_total * cur_life_steal_pct / 100.0)::int);
-      end if;
-      if cur_bleed_pct > 0 and (member->>'hp')::int - dmg_total > 0 then
-        -- Only refresh Bleed on a target that's still alive after this hit
-        -- -- no point ticking a DoT against a corpse. REFRESHES (overwrites)
-        -- any Bleed already on this target rather than stacking multiple
-        -- instances -- the latest landed hit always wins, same "no stacking
-        -- complexity" simplicity apply_bleed_ticks() itself relies on.
-        cur_pack := jsonb_set(cur_pack, array[target_idx::text, 'bleed_dmg'], to_jsonb(round(dmg_total * cur_bleed_pct / 100.0)::int));
-        cur_pack := jsonb_set(cur_pack, array[target_idx::text, 'bleed_rounds'], to_jsonb(bleed_duration_rounds));
-      end if;
-
-      -- Kill heal: a FULL heal (to this fight's effective max HP), per pack
-      -- member killed (target_idx was only ever selected from hp>0 members
-      -- above, so pre-swing hp is always >0 here -- a kill is exactly this
-      -- swing's damage taking it to <=0). Was a 25%-of-max partial heal;
-      -- bumped to a full heal per request -- every landed kill now tops the
-      -- player right back off, same as a death's respawn heal already did.
-      if (member->>'hp')::int - dmg_total <= 0 then
-        cur_player_hp := cur_player_max_hp;
-      end if;
-
-      -- Multi Strike: a bonus swing that CASCADES to the next still-alive
-      -- member (re-hitting the same one if it's the last one standing) —
-      -- this is what makes the stat directly valuable against a pack,
-      -- not just a flat extra hit on a single target.
-      if random() < (greatest(0, p.multi_strike + mod_val(player_mods, 'multi_strike_flat')) / 100.0) then
-        select min(idx - 1) into target_idx
-          from jsonb_array_elements(cur_pack) with ordinality as t(elem, idx)
-          where (elem->>'hp')::int > 0;
-        if target_idx is not null then
-          member := cur_pack -> target_idx;
-          select * into hit from compute_damage(p.attack, p.crit, (member->>'defense')::numeric, player_mods, enemy_mods, p.crit_damage);
-          -- Same Abyssal Touch / Life Steal / Bleed treatment as the
-          -- primary swing above -- a Multi Strike hit is a full landed hit
-          -- in its own right, not a lesser echo of the primary one.
-          dmg_total := hit.dmg + round(cur_abyssal_touch)::int;
-          cur_pack := jsonb_set(cur_pack, array[target_idx::text, 'hp'],
-            to_jsonb(greatest(0, (member->>'hp')::int - dmg_total)));
-          total_damage := total_damage + dmg_total;
-          round_hits := round_hits || jsonb_build_array(jsonb_build_object(
-            'source', 'player', 'target', target_idx, 'dmg', dmg_total, 'crit', hit.was_crit, 'multi_strike', true
-          ));
-          if cur_life_steal_pct > 0 then
-            cur_player_hp := least(cur_player_max_hp, cur_player_hp + round(dmg_total * cur_life_steal_pct / 100.0)::int);
-          end if;
-          if cur_bleed_pct > 0 and (member->>'hp')::int - dmg_total > 0 then
-            cur_pack := jsonb_set(cur_pack, array[target_idx::text, 'bleed_dmg'], to_jsonb(round(dmg_total * cur_bleed_pct / 100.0)::int));
-            cur_pack := jsonb_set(cur_pack, array[target_idx::text, 'bleed_rounds'], to_jsonb(bleed_duration_rounds));
-          end if;
-          -- same kill heal as the primary swing above -- multi strike can
-          -- land its own separate kill this round.
-          if (member->>'hp')::int - dmg_total <= 0 then
-            cur_player_hp := cur_player_max_hp;
-          end if;
-        end if;
+    -- Multi Strike: used to be a single chance-gated bonus swing that
+    -- wasted anything rolled past a 100% proc chance -- fixed/extended:
+    -- cur_multi_strike_guaranteed (every full 100%, computed once above the
+    -- round loop) now fires as that many GUARANTEED extra swings, and
+    -- cur_multi_strike_chance (the leftover remainder) is still a genuine
+    -- proc chance for one more on top. Each bonus swing is a full
+    -- independent resolve_player_hit() call -- its own target selection
+    -- (cascading to the next still-alive member, same as always), own crit
+    -- roll, own AOE Damage splash -- never a weaker echo of the primary hit.
+    for ms_i in 1..cur_multi_strike_guaranteed loop
+      select * into swing from resolve_player_hit(
+        cur_pack, p.attack, p.crit, p.crit_damage, player_mods, enemy_mods,
+        cur_abyssal_touch, cur_life_steal_pct, cur_bleed_pct, bleed_duration_rounds,
+        cur_aoe_guaranteed, cur_aoe_chance, cur_player_hp, cur_player_max_hp, true
+      );
+      exit when not swing.landed; -- pack cleared mid-flurry -- nothing left to hit
+      cur_pack := swing.new_pack;
+      cur_player_hp := swing.new_player_hp;
+      round_hits := round_hits || swing.hits;
+      total_damage := total_damage + swing.damage_dealt;
+    end loop;
+    if cur_multi_strike_chance > 0 and random() < cur_multi_strike_chance then
+      select * into swing from resolve_player_hit(
+        cur_pack, p.attack, p.crit, p.crit_damage, player_mods, enemy_mods,
+        cur_abyssal_touch, cur_life_steal_pct, cur_bleed_pct, bleed_duration_rounds,
+        cur_aoe_guaranteed, cur_aoe_chance, cur_player_hp, cur_player_max_hp, true
+      );
+      if swing.landed then
+        cur_pack := swing.new_pack;
+        cur_player_hp := swing.new_player_hp;
+        round_hits := round_hits || swing.hits;
+        total_damage := total_damage + swing.damage_dealt;
       end if;
     end if;
 
@@ -2956,34 +3088,24 @@ $$;
 --    helm/weapon/garb/ring roll from the six STANDARD stats (the same
 --    _pct/_flat mod keys class_defs/affix_defs/debuff_defs already use,
 --    picking DISTINCT keys per item at a magnitude scaled by rarity);
---    relic rolls from the eleven RELIC-ONLY stats in DESIGN.md §3a, using
---    that section's own "N% per roll" convention instead (each roll adds a
+--    relic rolls from the twelve RELIC-ONLY stats in DESIGN.md §3a, using
+--    that section's own "N per roll" convention instead (each roll adds a
 --    small FIXED amount to a randomly chosen relic key, so a high-rarity
 --    relic can stack the same stat multiple times over rather than always
 --    spreading across distinct ones). junk (0 rolls) always comes back
 --    with empty mods -- pure sell fodder, nothing to equip for.
 --
---    IMPORTANT, not yet done: nine of the eleven relic-only mod keys this
---    rolls (life_steal_pct, dodge_flat, block_flat, parry_flat, riposte_flat,
---    thorns_flat, bristle_back_pct, bleed_pct, abyssal_touch_flat) are
---    brand new -- nothing in compute_damage()/resolve_combat_action() reads
---    any of them yet, so a rolled/equipped Relic carrying only these sits
---    inert in combat today the same way Speed itself did before Evasion was
---    wired in (see resolve_combat_action()'s cur_player_evasion_pct comment).
---    Implementing each of those nine mechanics (life steal healing, a
---    dodge/block/parry/riposte defensive-roll layer, a damage-over-time
---    bleed, a thorns reflect, abyssal bonus damage) is real per-mechanic
---    design work, left for a follow-up pass -- this one lays the
---    itemization foundation (drops, rarity, slots, equip/unequip, and the
---    standard-stat slots DOING something in combat) without trying to also
---    invent nine new combat mechanics in the same round.
---
---    The other two relic keys, xp_gain_pct and item_find_pct, are NOT part
---    of that inert set -- they're simple economy multipliers with no new
---    combat mechanic to design, so they were wired live from day one: see
---    the relic_pool comment just below, and resolve_combat_action()'s
---    pack_xp line / drop_chance check, plus perform_idle_tick()'s passive
---    trickle formula.
+--    STATUS: all twelve relic-only keys are live in combat today, not just
+--    rolled/equippable -- Life Steal/Bleed/Abyssal Touch/Dodge/Block/Parry/
+--    Riposte/Thorns/Bristle Back (see resolve_combat_action()'s
+--    cur_life_steal_pct/cur_bleed_pct/cur_abyssal_touch and
+--    pack_counterattack() for the defense-side four), Increased XP/Increased
+--    Item Find (pack_xp / drop_chance below, plus perform_idle_tick()'s
+--    passive trickle), and AOE Damage, the newest one, whose splash-onto-
+--    extra-targets mechanic lives in resolve_player_hit() (see its own
+--    comment, just above resolve_combat_action() in this file). None of
+--    these sit inert the way Speed itself briefly did before Evasion was
+--    wired in.
 --
 --    loot_drop itself (the type roll_loot() returns) is declared earlier in
 --    this file, right before resolve_combat_action() -- see that type's own
@@ -3007,15 +3129,24 @@ declare
   -- passive trickle, item_find_pct boosts drop_chance below. Simple
   -- multipliers, no new combat mechanic to design, so no reason to ship
   -- them inert like the defensive/offensive relic stats.
-  relic_pool text[] := array['life_steal_pct','dodge_flat','block_flat','parry_flat','riposte_flat','thorns_flat','bristle_back_pct','bleed_pct','abyssal_touch_flat','xp_gain_pct','item_find_pct'];
+  relic_pool text[] := array['life_steal_pct','dodge_flat','block_flat','parry_flat','riposte_flat','thorns_flat','bristle_back_pct','bleed_pct','abyssal_touch_flat','xp_gain_pct','item_find_pct','aoe_damage_pct'];
   -- fixed per-roll amount for relic stats, per DESIGN.md §3a's own
   -- "1% per roll" convention (Thorns is the one flat-damage exception there,
   -- "5 per roll"; Abyssal Touch has no stated rate in DESIGN.md, so it's
-  -- given a comparable small flat bite here, 3 per roll -- TUNE).
+  -- given a comparable small flat bite here, 3 per roll -- TUNE). AOE
+  -- Damage gets its own much bigger per-roll amount, 15 -- unlike every
+  -- other relic stat here, it only does anything once it clears a full
+  -- 100% (see resolve_player_hit()'s comment), so a "1% per roll" rate
+  -- would need 100 rolls just to matter once, impossible when even a
+  -- Void Spiraled item only ever rolls 5 times. 15/roll means a single
+  -- maxed item (5 rolls, all into this key) reaches 75%, and two such
+  -- items stacked (150%) crosses the first guaranteed extra target with a
+  -- 50% chance at a second -- an achievable, chase-worthy endgame target
+  -- rather than a stat that's mathematically unreachable. TUNE.
   relic_per_roll jsonb := '{
     "life_steal_pct": 1, "dodge_flat": 1, "block_flat": 1, "parry_flat": 1,
     "riposte_flat": 1, "thorns_flat": 5, "bristle_back_pct": 1, "bleed_pct": 1,
-    "abyssal_touch_flat": 3, "xp_gain_pct": 2, "item_find_pct": 3
+    "abyssal_touch_flat": 3, "xp_gain_pct": 2, "item_find_pct": 3, "aoe_damage_pct": 15
   }'::jsonb;
   mag_ranges jsonb := '{
     "common": [2,5], "rare": [4,8], "epic": [7,12], "legendary": [12,20],

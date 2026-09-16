@@ -573,8 +573,16 @@
        0.100) if the player explicitly asks for a bigger jump for that
        round. -->
   <script>
-    window.APP_VERSION = "0.020";
+    window.APP_VERSION = "0.021";
     window.PATCH_NOTES = [
+      {
+        "version": "0.021",
+        "notes": [
+          "New relic affix: AOE Damage -- every full 100% splashes your hit onto one more enemy at the same time, for the same damage. 250% means 2 guaranteed extra targets plus a 50% chance at a 3rd.",
+          "Multi Strike reworked: it used to cap out at one bonus swing no matter how high you stacked it, wasting anything past 100%. Now every full 100% is a guaranteed extra swing, with the leftover as a chance at one more -- 250% Multi Strike means 2 guaranteed bonus swings plus a 50% chance of a 3rd.",
+          "Crit Damage was double-checked and confirmed already correct -- it was already an uncapped, straight multiplier with no waste, so nothing needed to change there."
+        ]
+      },
       {
         "version": "0.020",
         "notes": [
