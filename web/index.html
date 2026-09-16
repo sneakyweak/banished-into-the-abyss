@@ -191,19 +191,21 @@
             <li><span class="stat-label" data-tooltip="Your chance to dodge an enemy hit entirely -- 0 damage, not even a graze. 1 Speed = 1% Evasion, hard-capped at 25% total.">Evasion</span><span id="stat-evasion">0%</span></li>
           </ul>
           <div class="panel-divider"></div>
-          <h3 class="panel-subtitle" data-tooltip="Reserved slots for bonus effects gear will eventually roll -- the same affixes packs can already spawn with, just permanently equipped instead of fight-only.">Additional Affixes</h3>
-          <!-- Reserved slots for affixes gear will eventually roll (same
-               vocabulary as the pack-combat affixes/debuffs in schema.sql —
-               see class_defs/affix_defs there). Not wired up yet; styled as
-               stat-list rows to match Combat Stats above rather than the
-               equipment panel's dashed slot boxes, since these read as
-               stats, not gear. -->
-          <ul class="stat-list affix-list">
-            <li><span class="stat-label">Affix</span><span>—</span></li>
-            <li><span class="stat-label">Affix</span><span>—</span></li>
-            <li><span class="stat-label">Affix</span><span>—</span></li>
-            <li><span class="stat-label">Affix</span><span>—</span></li>
-          </ul>
+          <h3 class="panel-subtitle" data-tooltip="The eleven relic-only stats (Dodge, Block, Life Steal, Increased XP, and so on) -- only shows the ones you actually have gear rolled for, summed across every equipped Relic.">Additional Affixes</h3>
+          <!-- Populated by renderAdditionalAffixes() in app.js from
+               state.equipment's equipped rows -- these are the eleven
+               relic-only stats in DESIGN.md §3a (Dodge/Block/Parry/
+               Riposte/Abyssal Touch/Thorns/Bristle Back/Life Steal/Bleed/
+               Increased XP/Increased Item Find), not the pack-combat
+               affixes/debuffs class_defs/affix_defs describe (a same-
+               vocabulary but otherwise unrelated system) -- summed across
+               every currently-equipped piece of gear (in practice, only
+               Relics ever roll these) and capped the same way the server
+               caps each one in schema.sql. Starts empty; JS fills in the
+               reserved "Affix —" placeholder rows itself if nothing's
+               equipped yet, so there's no flash of unstyled content before
+               the first render. -->
+          <ul id="affix-list" class="stat-list affix-list"></ul>
         </aside>
       </div>
 
@@ -567,8 +569,15 @@
        0.100) if the player explicitly asks for a bigger jump for that
        round. -->
   <script>
-    window.APP_VERSION = "0.014";
+    window.APP_VERSION = "0.015";
     window.PATCH_NOTES = [
+      {
+        "version": "0.015",
+        "notes": [
+          "Relic gear is fully live now: Dodge, Block, Parry, Riposte, Abyssal Touch, Thorns, Bristle Back, Life Steal, and Bleed all actually do something in a fight, on top of Increased XP/Item Find which already worked.",
+          "The Combat Stats panel's Additional Affixes section now actually shows your equipped Relics' bonus effects (it used to just be empty dashes) -- only what you actually have, and only while it's above 0."
+        ]
+      },
       {
         "version": "0.014",
         "notes": [

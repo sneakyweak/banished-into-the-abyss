@@ -882,11 +882,15 @@ button:disabled { opacity: 0.4; cursor: not-allowed; }
 .auto-scrap-check { display: flex; align-items: center; gap: 4px; font-size: 0.75rem; cursor: pointer; }
 .auto-scrap-check input { margin: 0; cursor: pointer; }
 
-/* Additional Affixes now reuses .stat-list's row layout (see Combat Stats
+/* Additional Affixes reuses .stat-list's row layout (see Combat Stats
    above) instead of the equipment panel's dashed slot boxes -- these read
-   as stats, not gear. Dimmed since the slots are unfilled/not wired up
-   yet, same intent as the old boxes' opacity. */
-.affix-list { opacity: 0.55; margin-top: 0; }
+   as stats, not gear. Full opacity by default now that the eleven relic
+   stats it shows are live in combat (see DESIGN.md §3a) -- dimmed only
+   when renderAdditionalAffixes() in app.js falls back to the reserved
+   "Affix --" placeholder rows because nothing's equipped yet, via the
+   affix-list-empty class it toggles on. */
+.affix-list { margin-top: 0; }
+.affix-list.affix-list-empty { opacity: 0.55; }
 
 /* Inventory */
 

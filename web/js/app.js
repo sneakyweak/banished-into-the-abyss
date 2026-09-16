@@ -1077,6 +1077,93 @@ function formatEquipMods(mods) {
 // EQ_STAT_LABELS above.
 const BAG_CAP = 250;
 
+// The eleven relic-only stats from DESIGN.md §3a, in the same order as its
+// table there -- drives both the Additional Affixes panel (Combat Stats
+// aside) below and, indirectly via EQ_STAT_LABELS, item tooltips/popups
+// elsewhere. Caps mirror what resolve_combat_action()/pack_counterattack()
+// actually enforce server-side in schema.sql (least(cap, ...) for each) --
+// display-only here, kept in sync by hand, same spirit as BAG_CAP above.
+// null means uncapped (Abyssal Touch, Thorns, Bristle Back, Increased XP,
+// Increased Item Find all have no ceiling server-side either).
+const RELIC_STAT_ORDER = [
+  "dodge_flat", "block_flat", "parry_flat", "riposte_flat", "abyssal_touch_flat",
+  "thorns_flat", "bristle_back_pct", "life_steal_pct", "bleed_pct", "xp_gain_pct", "item_find_pct",
+];
+const RELIC_STAT_CAPS = {
+  dodge_flat: 25, block_flat: 25, parry_flat: 25, riposte_flat: 25,
+  abyssal_touch_flat: null, thorns_flat: null, bristle_back_pct: null,
+  life_steal_pct: 50, bleed_pct: 25, xp_gain_pct: null, item_find_pct: null,
+};
+
+// The "Additional Affixes" section of the Combat Stats panel -- every
+// relic-only stat (RELIC_STAT_ORDER above) summed across all currently-
+// EQUIPPED gear (in practice only Relics ever roll these keys, but this
+// sums whatever's actually equipped rather than special-casing the slot,
+// same "just read the mods" treatment resolve_combat_action() itself uses
+// server-side), capped for display the same way the server caps each one
+// for real. Only shows stats the player actually has a nonzero total for --
+// falls back to the original four reserved "Affix —" dash rows when none
+// apply, so the panel never just goes blank/empty-looking.
+function renderAdditionalAffixes() {
+  const ul = $("affix-list");
+  if (!ul) return;
+
+  const totals = {};
+  (state.equipment || [])
+    .filter((e) => e.equipped_at)
+    .forEach((e) => {
+      Object.entries(e.mods || {}).forEach(([key, val]) => {
+        if (!RELIC_STAT_ORDER.includes(key)) return;
+        totals[key] = (totals[key] || 0) + (Number(val) || 0);
+      });
+    });
+
+  const activeKeys = RELIC_STAT_ORDER.filter((key) => totals[key] > 0);
+
+  ul.innerHTML = "";
+  // affix-list-empty (see style.css) is what dims the panel -- only while
+  // showing the reserved placeholder rows below, not once real stats are
+  // live in it.
+  ul.classList.toggle("affix-list-empty", !activeKeys.length);
+
+  if (!activeKeys.length) {
+    for (let i = 0; i < 4; i++) {
+      const li = document.createElement("li");
+      const label = document.createElement("span");
+      label.className = "stat-label";
+      label.textContent = "Affix";
+      const val = document.createElement("span");
+      val.textContent = "—";
+      li.appendChild(label);
+      li.appendChild(val);
+      ul.appendChild(li);
+    }
+    return;
+  }
+
+  activeKeys.forEach((key) => {
+    const cap = RELIC_STAT_CAPS[key];
+    const raw = totals[key];
+    const effective = cap != null ? Math.min(cap, raw) : raw;
+    const suffix = key.endsWith("_pct") ? "%" : "";
+
+    const li = document.createElement("li");
+    const label = document.createElement("span");
+    label.className = "stat-label";
+    label.textContent = EQ_STAT_LABELS[key] || key;
+    if (cap != null) {
+      label.dataset.tooltip = raw > cap
+        ? `Capped at ${cap}${suffix} -- you have ${raw}${suffix} rolled, so ${raw - cap}${suffix} of it is currently wasted.`
+        : `Capped at ${cap}${suffix}.`;
+    }
+    const val = document.createElement("span");
+    val.textContent = `${effective}${suffix}`;
+    li.appendChild(label);
+    li.appendChild(val);
+    ul.appendChild(li);
+  });
+}
+
 async function loadEquipment() {
   const { data, error } = await sb
     .from("equipment")
@@ -1087,6 +1174,7 @@ async function loadEquipment() {
   state.equipment = data || [];
   renderEquipmentSlots();
   renderInventoryPanel();
+  renderAdditionalAffixes();
 }
 
 // Fills the 7 equip-slot boxes in index.html (eq-slot-helm/weapon/garb/

@@ -1293,17 +1293,43 @@ begin
 end;
 $$;
 
+-- Postgres can't CREATE OR REPLACE a function onto a different return
+-- signature -- a project that already ran the old 2-column-return version
+-- (before Dodge/Block/Parry/Riposte/Thorns/Bristle Back below) needs it
+-- dropped first. Safe no-op on a project that's never defined it.
+drop function if exists pack_counterattack(jsonb, numeric, jsonb, jsonb, numeric);
+
 -- Resolves every still-alive pack member's counter-swing against the player
--- in one pass, rolling the player's Speed-derived evasion chance (see
--- cur_player_evasion_pct in strike_enemy) per hit before compute_damage
--- ever runs — a dodge skips the damage roll entirely rather than rolling it
--- and zeroing it out, so a dodge and a 0-damage hit stay distinguishable in
--- the log ('dodged' vs 'dmg':0). Returns the total hp delta (always <= 0)
--- rather than mutating anything itself, so the caller decides when/whether
--- to clamp at 0 and check for a death — this is what strike_enemy calls
--- from BOTH initiative orderings (enemies-first when out-sped, or the
--- original player-then-pack order otherwise) instead of that ~20-line loop
--- needing to be written out twice.
+-- in one pass. Per hit, in order:
+--   1. Full avoidance -- TWO independent rolls, not one merged number: the
+--      player's Speed-derived evasion (p_evasion_pct, unchanged from
+--      before this pass) first, then relic-rolled Dodge (dodge_flat,
+--      capped 25%) -- see DESIGN.md §3a's note that these are meant to
+--      stack as separate sources of the same "avoid this hit entirely"
+--      outcome, so a dodge from either skips compute_damage() entirely
+--      the same way a dodge always has.
+--   2. If not avoided: Block and Parry are two MORE independent rolls
+--      (both CAN land on the same hit, multiplying together) -- Block
+--      halves the roll, Parry cuts it by 25%, per DESIGN.md's table.
+--   3. Riposte (a THIRD independent roll) and Thorns (not a roll at all --
+--      a flat, always-on effect, same treatment as Abyssal Touch on the
+--      offense side) both react to "the player got hit at all", applied
+--      against the FINAL (post-Block/Parry) damage number, and both deal
+--      their damage back to the SPECIFIC attacking member -- which is why
+--      this function now also returns the (possibly modified) pack rather
+--      than just an hp delta, and a running total of how much reflect
+--      damage it dealt (so the caller's own damage_dealt stat can include
+--      it -- see resolve_combat_action()'s counter_reflect_dmg).
+-- Bristle Back (a straight multiplier on Thorns' flat damage) is folded
+-- into the Thorns calculation directly rather than being its own step.
+-- Life Steal, Bleed, and Abyssal Touch are NOT handled here -- they react
+-- to the PLAYER's own outgoing hits, not an enemy's, so they live in
+-- resolve_combat_action()'s swing blocks instead.
+-- Still returns the total hp delta (always <= 0) rather than mutating the
+-- player's hp itself, same reasoning as before -- the caller decides
+-- when/whether to clamp at 0 and check for a death. Called from BOTH
+-- initiative orderings (enemies-first when out-sped, or the original
+-- player-then-pack order otherwise) instead of writing this loop twice.
 create or replace function pack_counterattack(
   p_pack jsonb,
   p_player_defense numeric,
@@ -1311,33 +1337,146 @@ create or replace function pack_counterattack(
   p_player_mods jsonb,
   p_evasion_pct numeric
 )
-returns table (new_player_hp_delta int, hits jsonb)
+returns table (new_player_hp_delta int, hits jsonb, new_pack jsonb, reflect_damage_dealt int)
 language plpgsql
 as $$
 declare
+  pack jsonb := p_pack;
   member jsonb;
   i int;
   hit record;
   total_delta int := 0;
   round_hits jsonb := '[]'::jsonb;
+  -- Relic-only DEFENSE stats (see DESIGN.md §3a) -- read once here rather
+  -- than per-hit, same "capped the same way every other percent-capped
+  -- relic stat is" treatment as cur_player_evasion_pct in
+  -- resolve_combat_action(). Floored at 0 so a future negative debuff/
+  -- affix can never make one of these subtract instead of add.
+  dodge_pct numeric := least(25, greatest(0, mod_val(p_player_mods, 'dodge_flat')));
+  block_pct numeric := least(25, greatest(0, mod_val(p_player_mods, 'block_flat')));
+  parry_pct numeric := least(25, greatest(0, mod_val(p_player_mods, 'parry_flat')));
+  riposte_pct numeric := least(25, greatest(0, mod_val(p_player_mods, 'riposte_flat')));
+  thorns_flat numeric := greatest(0, mod_val(p_player_mods, 'thorns_flat'));
+  bristle_back_pct numeric := greatest(0, mod_val(p_player_mods, 'bristle_back_pct'));
+  avoided boolean;
+  avoid_source text;
+  dmg int;
+  blocked boolean;
+  parried boolean;
+  riposted boolean;
+  riposte_dmg int;
+  thorns_dmg int;
+  member_hp int;
+  reflect_total int := 0;
 begin
-  for i in 0 .. jsonb_array_length(p_pack) - 1 loop
-    member := p_pack -> i;
+  for i in 0 .. jsonb_array_length(pack) - 1 loop
+    member := pack -> i;
     if (member->>'hp')::int > 0 then
+      avoided := false;
+      avoid_source := null;
+
       if random() * 100 < greatest(0, p_evasion_pct) then
+        avoided := true;
+        avoid_source := 'evasion';
+      elsif random() * 100 < dodge_pct then
+        avoided := true;
+        avoid_source := 'dodge';
+      end if;
+
+      if avoided then
         round_hits := round_hits || jsonb_build_array(jsonb_build_object(
-          'source', 'enemy', 'source_slot', i, 'dmg', 0, 'crit', false, 'dodged', true
+          'source', 'enemy', 'source_slot', i, 'dmg', 0, 'crit', false, 'dodged', true, 'dodge_source', avoid_source
         ));
       else
         select * into hit from compute_damage((member->>'attack')::numeric, 0, p_player_defense, p_enemy_mods, p_player_mods);
-        total_delta := total_delta - hit.dmg;
+        dmg := hit.dmg;
+        blocked := false;
+        parried := false;
+
+        if random() * 100 < block_pct then
+          blocked := true;
+          dmg := greatest(0, round(dmg * 0.5));
+        end if;
+        if random() * 100 < parry_pct then
+          parried := true;
+          dmg := greatest(0, round(dmg * 0.75));
+        end if;
+
+        total_delta := total_delta - dmg;
+
+        -- Riposte: an independent chance roll, reflecting 25% of THIS hit's
+        -- final (post-Block/Parry) damage back at the attacker.
+        riposted := false;
+        riposte_dmg := 0;
+        if random() * 100 < riposte_pct then
+          riposted := true;
+          riposte_dmg := round(dmg * 0.25);
+        end if;
+
+        -- Thorns: not a roll -- a flat, always-on reflect whenever the
+        -- player is actually hit (Block/Parry still count as "hit", only
+        -- full avoidance above skips this), scaled by Bristle Back.
+        thorns_dmg := round(thorns_flat * (1 + bristle_back_pct / 100.0));
+
+        if riposte_dmg > 0 or thorns_dmg > 0 then
+          member_hp := greatest(0, (member->>'hp')::int - riposte_dmg - thorns_dmg);
+          pack := jsonb_set(pack, array[i::text, 'hp'], to_jsonb(member_hp));
+          reflect_total := reflect_total + riposte_dmg + thorns_dmg;
+        end if;
+
         round_hits := round_hits || jsonb_build_array(jsonb_build_object(
-          'source', 'enemy', 'source_slot', i, 'dmg', hit.dmg, 'crit', hit.was_crit, 'dodged', false
+          'source', 'enemy', 'source_slot', i, 'dmg', dmg, 'crit', hit.was_crit, 'dodged', false,
+          'blocked', blocked, 'parried', parried, 'riposte_dmg', riposte_dmg, 'thorns_dmg', thorns_dmg
         ));
       end if;
     end if;
   end loop;
-  return query select total_delta, round_hits;
+  return query select total_delta, round_hits, pack, reflect_total;
+end;
+$$;
+
+-- Ticks every pack member's active Bleed DoT down by one round (see
+-- DESIGN.md §3a and the swing blocks in resolve_combat_action() that apply
+-- Bleed in the first place): a bleeding member takes its stored 'bleed_dmg'
+-- flat damage and 'bleed_rounds' decrements by 1, clearing both fields back
+-- to 0 once it reaches 0 rather than leaving a stale "bleeding for 0 more
+-- rounds" state sitting in the pack jsonb forever. A member already at
+-- hp<=0, or with no active Bleed (bleed_rounds missing/0 -- ordinary pack
+-- members from roll_pack() never have these keys at all until a Bleed
+-- first lands, hence the coalesce-to-0 reads), is left untouched. Called
+-- once per round, at the very start, before initiative -- so a kill from
+-- Bleed is visible (and reward-eligible via resolve_combat_action()'s
+-- existing any_alive check) starting the SAME round it happens, not a
+-- round later.
+create or replace function apply_bleed_ticks(p_pack jsonb)
+returns table (new_pack jsonb, tick_damage int)
+language plpgsql
+as $$
+declare
+  pack jsonb := p_pack;
+  member jsonb;
+  i int;
+  bleed_dmg int;
+  bleed_rounds int;
+  new_hp int;
+  total_tick int := 0;
+begin
+  for i in 0 .. jsonb_array_length(pack) - 1 loop
+    member := pack -> i;
+    bleed_rounds := coalesce((member->>'bleed_rounds')::int, 0);
+    if (member->>'hp')::int > 0 and bleed_rounds > 0 then
+      bleed_dmg := coalesce((member->>'bleed_dmg')::int, 0);
+      new_hp := greatest(0, (member->>'hp')::int - bleed_dmg);
+      bleed_rounds := bleed_rounds - 1;
+      pack := jsonb_set(pack, array[i::text, 'hp'], to_jsonb(new_hp));
+      pack := jsonb_set(pack, array[i::text, 'bleed_rounds'], to_jsonb(bleed_rounds));
+      if bleed_rounds <= 0 then
+        pack := jsonb_set(pack, array[i::text, 'bleed_dmg'], to_jsonb(0));
+      end if;
+      total_tick := total_tick + bleed_dmg;
+    end if;
+  end loop;
+  return query select pack, total_tick;
 end;
 $$;
 
@@ -1705,6 +1844,30 @@ declare
   player_first boolean;
   counter_delta int;
   counter_hits jsonb;
+  -- Reflect damage (Thorns/Riposte, see pack_counterattack()'s new_pack/
+  -- reflect_damage_dealt return columns) can modify cur_pack from WITHIN a
+  -- counterattack call, on top of the hp delta it already dealt the player --
+  -- both counterattack call sites below capture this the same way.
+  counter_pack jsonb;
+  counter_reflect_dmg int;
+  -- Relic-only OFFENSE stats (see DESIGN.md §3a) -- computed once here, same
+  -- "read before the round loop" treatment as cur_player_evasion_pct above.
+  -- Dodge/Block/Parry/Riposte (the DEFENSE-side relic stats) are read fresh
+  -- inside pack_counterattack() itself instead, since it already receives
+  -- player_mods and is the only place that needs them. Life Steal and Bleed
+  -- are deterministic per-hit magnitudes, not chance rolls -- see where
+  -- they're applied in the swing blocks below for why. Abyssal Touch is a
+  -- flat, always-on bonus, same treatment as Thorns on the defense side.
+  cur_life_steal_pct numeric;
+  cur_bleed_pct numeric;
+  cur_abyssal_touch numeric;
+  bleed_duration_rounds int := 3; -- TUNE: rounds a Bleed application lasts
+  bleed_tick_dmg int;
+  -- A landed player hit's damage AFTER Abyssal Touch's flat add -- every
+  -- place that used to read hit.dmg directly (pack hp reduction, total_damage,
+  -- the round log, the kill-heal check) now reads this instead, so Abyssal
+  -- Touch damage counts everywhere a normal hit's damage already did.
+  dmg_total int;
   -- Whatever affixes/debuffs the pack we're CURRENTLY fighting rolled with,
   -- carried forward unchanged by default. Every mid-tick respawn point below
   -- (pack cleared, or either death branch) reassigns these to a brand-new
@@ -1772,6 +1935,14 @@ begin
   cur_player_speed := greatest(1, p.speed * (1 + mod_val(player_mods, 'speed_pct') / 100.0));
   cur_player_evasion_pct := least(25, greatest(0, p.speed + mod_val(player_mods, 'evasion_flat')));
 
+  -- Life Steal / Bleed / Abyssal Touch (see DESIGN.md §3a) -- capped the
+  -- same way every other percent-capped relic stat is (least(cap, ...)),
+  -- floored at 0 so a future negative debuff/affix can never make one of
+  -- these subtract instead of add.
+  cur_life_steal_pct := least(50, greatest(0, mod_val(player_mods, 'life_steal_pct')));
+  cur_bleed_pct := least(25, greatest(0, mod_val(player_mods, 'bleed_pct')));
+  cur_abyssal_touch := greatest(0, mod_val(player_mods, 'abyssal_touch_flat'));
+
   cur_pack := p_cur_pack;
   -- a self-imposed hp_pct debuff temporarily lowers the player's effective
   -- ceiling for THIS fight only — never written back to profiles.max_hp —
@@ -1796,6 +1967,16 @@ begin
     rounds_run := rounds_run + 1;
     round_hits := '[]'::jsonb;
 
+    -- Bleed ticks at the START of every round, before initiative -- any
+    -- pack member currently bleeding (from a Bleed application on a prior
+    -- landed hit, see the swing blocks below) takes its stored flat tick
+    -- damage here. A kill from Bleed is caught by the ordinary any_alive
+    -- check further down THIS SAME round (target selection and multi
+    -- strike simply find nothing left to hit) rather than needing its own
+    -- special case.
+    select t.new_pack, t.tick_damage into cur_pack, bleed_tick_dmg from apply_bleed_ticks(cur_pack) t;
+    total_damage := total_damage + bleed_tick_dmg;
+
     -- Initiative: recomputed every round, not once per fight — which side
     -- is "faster" can shift as the pack thins out (a slow tank pack might
     -- out-pace the player early but fall behind once only its quickest
@@ -1808,13 +1989,20 @@ begin
 
     if not player_first then
       -- Out-sped: the pack gets this round's first blow in before the
-      -- player ever swings — evasion (cur_player_evasion_pct) is the only
-      -- thing that can save them from it now.
-      select t.new_player_hp_delta, t.hits into counter_delta, counter_hits
+      -- player ever swings — Evasion and relic Dodge (both rolled inside
+      -- pack_counterattack() now) are the only things that can save them
+      -- from it now.
+      select t.new_player_hp_delta, t.hits, t.new_pack, t.reflect_damage_dealt
+        into counter_delta, counter_hits, counter_pack, counter_reflect_dmg
         from pack_counterattack(cur_pack, p.defense::numeric, enemy_mods, player_mods, cur_player_evasion_pct) t;
       cur_player_hp := greatest(0, cur_player_hp + counter_delta);
       total_damage_taken := total_damage_taken - counter_delta;
       round_hits := round_hits || counter_hits;
+      -- Thorns/Riposte (see pack_counterattack()'s comment) may have
+      -- reflected damage back onto whichever member(s) just swung --
+      -- adopt the updated pack and count that damage in this tick's total.
+      cur_pack := counter_pack;
+      total_damage := total_damage + counter_reflect_dmg;
 
       if cur_player_hp <= 0 then
         -- Death penalty: currently 0% of both gold and xp -- TUNE, set to
@@ -1866,19 +2054,45 @@ begin
     if target_idx is not null then
       member := cur_pack -> target_idx;
       select * into hit from compute_damage(p.attack, p.crit, (member->>'defense')::numeric, player_mods, enemy_mods, p.crit_damage);
+      -- Abyssal Touch: a flat, always-on bonus added to every landed hit
+      -- (see cur_abyssal_touch above) -- applied AFTER compute_damage's own
+      -- crit/mitigation math so it's a flat add, never itself inflated by
+      -- a crit roll. dmg_total replaces hit.dmg everywhere below (pack hp
+      -- reduction, total_damage, the round log, the kill-heal check) so
+      -- Abyssal Touch damage counts everywhere a normal hit's already did.
+      dmg_total := hit.dmg + round(cur_abyssal_touch)::int;
       cur_pack := jsonb_set(cur_pack, array[target_idx::text, 'hp'],
-        to_jsonb(greatest(0, (member->>'hp')::int - hit.dmg)));
-      total_damage := total_damage + hit.dmg;
+        to_jsonb(greatest(0, (member->>'hp')::int - dmg_total)));
+      total_damage := total_damage + dmg_total;
       round_hits := round_hits || jsonb_build_array(jsonb_build_object(
-        'source', 'player', 'target', target_idx, 'dmg', hit.dmg, 'crit', hit.was_crit, 'multi_strike', false
+        'source', 'player', 'target', target_idx, 'dmg', dmg_total, 'crit', hit.was_crit, 'multi_strike', false
       ));
+
+      -- Life Steal and Bleed are deterministic per-hit magnitudes, not
+      -- chance rolls (unlike Dodge/Block/Parry/Riposte in
+      -- pack_counterattack()) -- every landed hit applies them, scaled by
+      -- the stat's own capped value. See cur_life_steal_pct/cur_bleed_pct
+      -- above.
+      if cur_life_steal_pct > 0 then
+        cur_player_hp := least(cur_player_max_hp, cur_player_hp + round(dmg_total * cur_life_steal_pct / 100.0)::int);
+      end if;
+      if cur_bleed_pct > 0 and (member->>'hp')::int - dmg_total > 0 then
+        -- Only refresh Bleed on a target that's still alive after this hit
+        -- -- no point ticking a DoT against a corpse. REFRESHES (overwrites)
+        -- any Bleed already on this target rather than stacking multiple
+        -- instances -- the latest landed hit always wins, same "no stacking
+        -- complexity" simplicity apply_bleed_ticks() itself relies on.
+        cur_pack := jsonb_set(cur_pack, array[target_idx::text, 'bleed_dmg'], to_jsonb(round(dmg_total * cur_bleed_pct / 100.0)::int));
+        cur_pack := jsonb_set(cur_pack, array[target_idx::text, 'bleed_rounds'], to_jsonb(bleed_duration_rounds));
+      end if;
+
       -- Kill heal: a FULL heal (to this fight's effective max HP), per pack
       -- member killed (target_idx was only ever selected from hp>0 members
       -- above, so pre-swing hp is always >0 here -- a kill is exactly this
       -- swing's damage taking it to <=0). Was a 25%-of-max partial heal;
       -- bumped to a full heal per request -- every landed kill now tops the
       -- player right back off, same as a death's respawn heal already did.
-      if (member->>'hp')::int - hit.dmg <= 0 then
+      if (member->>'hp')::int - dmg_total <= 0 then
         cur_player_hp := cur_player_max_hp;
       end if;
 
@@ -1893,15 +2107,26 @@ begin
         if target_idx is not null then
           member := cur_pack -> target_idx;
           select * into hit from compute_damage(p.attack, p.crit, (member->>'defense')::numeric, player_mods, enemy_mods, p.crit_damage);
+          -- Same Abyssal Touch / Life Steal / Bleed treatment as the
+          -- primary swing above -- a Multi Strike hit is a full landed hit
+          -- in its own right, not a lesser echo of the primary one.
+          dmg_total := hit.dmg + round(cur_abyssal_touch)::int;
           cur_pack := jsonb_set(cur_pack, array[target_idx::text, 'hp'],
-            to_jsonb(greatest(0, (member->>'hp')::int - hit.dmg)));
-          total_damage := total_damage + hit.dmg;
+            to_jsonb(greatest(0, (member->>'hp')::int - dmg_total)));
+          total_damage := total_damage + dmg_total;
           round_hits := round_hits || jsonb_build_array(jsonb_build_object(
-            'source', 'player', 'target', target_idx, 'dmg', hit.dmg, 'crit', hit.was_crit, 'multi_strike', true
+            'source', 'player', 'target', target_idx, 'dmg', dmg_total, 'crit', hit.was_crit, 'multi_strike', true
           ));
+          if cur_life_steal_pct > 0 then
+            cur_player_hp := least(cur_player_max_hp, cur_player_hp + round(dmg_total * cur_life_steal_pct / 100.0)::int);
+          end if;
+          if cur_bleed_pct > 0 and (member->>'hp')::int - dmg_total > 0 then
+            cur_pack := jsonb_set(cur_pack, array[target_idx::text, 'bleed_dmg'], to_jsonb(round(dmg_total * cur_bleed_pct / 100.0)::int));
+            cur_pack := jsonb_set(cur_pack, array[target_idx::text, 'bleed_rounds'], to_jsonb(bleed_duration_rounds));
+          end if;
           -- same kill heal as the primary swing above -- multi strike can
           -- land its own separate kill this round.
-          if (member->>'hp')::int - hit.dmg <= 0 then
+          if (member->>'hp')::int - dmg_total <= 0 then
             cur_player_hp := cur_player_max_hp;
           end if;
         end if;
@@ -1985,11 +2210,22 @@ begin
       -- the player's hit above — the original, still-default order. (When
       -- NOT player_first, this already happened at the top of the round,
       -- before the player's swing — see above.)
-      select t.new_player_hp_delta, t.hits into counter_delta, counter_hits
+      select t.new_player_hp_delta, t.hits, t.new_pack, t.reflect_damage_dealt
+        into counter_delta, counter_hits, counter_pack, counter_reflect_dmg
         from pack_counterattack(cur_pack, p.defense::numeric, enemy_mods, player_mods, cur_player_evasion_pct) t;
       cur_player_hp := greatest(0, cur_player_hp + counter_delta);
       total_damage_taken := total_damage_taken - counter_delta;
       round_hits := round_hits || counter_hits;
+      -- Thorns/Riposte reflect damage -- see the mirrored comment in the
+      -- not-player_first branch above. In the rare case this reflect
+      -- damage happens to clear the pack on the SAME round the any_alive
+      -- check above already ran (i.e. right before this branch), the
+      -- clear's reward is simply picked up next round instead -- the loop
+      -- re-checks any_alive fresh every round, so nothing is lost, just
+      -- delayed by one round. Not worth special-casing for something this
+      -- rare.
+      cur_pack := counter_pack;
+      total_damage := total_damage + counter_reflect_dmg;
 
       if cur_player_hp <= 0 then
         -- pack wiped the player — WIN-ONLY REWARDS: nothing is granted
