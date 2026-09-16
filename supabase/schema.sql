@@ -264,6 +264,37 @@ create table if not exists inventory (
   primary key (profile_id, item_id)
 );
 
+-- Equipment: procedurally-rolled gear, one row per drop. Deliberately a
+-- separate table from items/inventory above rather than reusing that
+-- pattern -- items/inventory models a shared CATALOG (every "Torchstone" is
+-- identical; players just hold a quantity of the same row), which doesn't
+-- fit gear at all, since every drop rolls its own specific stats and needs
+-- its own row, not a shared key + quantity. mods uses the same
+-- modifier-bundle vocabulary as class_defs/affix_defs/debuff_defs (stat key
+-- -> number), merged into player_mods at combat time by whatever's
+-- currently equipped -- see roll_loot()/equip_item() further down. Per
+-- DESIGN.md §3's itemization note, gear mods are NEVER written to profiles'
+-- own attack/defense/max_hp/etc columns -- gear has to stay swappable and
+-- losable, never something Banishment retention could launder into
+-- permanent stats.
+create table if not exists equipment (
+  id           uuid primary key default gen_random_uuid(),
+  profile_id   uuid not null references profiles(id) on delete cascade,
+  slot         text not null check (slot in ('helm','weapon','garb','ring','relic')),
+  rarity       text not null check (rarity in ('junk','common','rare','epic','legendary','void_touched','void_spiraled')),
+  name         text not null,
+  mods         jsonb not null default '{}'::jsonb,
+  -- null = sitting unequipped in inventory. Non-null = currently equipped;
+  -- the actual timestamp value only matters as "not null", not for its
+  -- contents -- equip_item()/unequip_item() enforce how many of a given
+  -- slot can be equipped at once (1 helm/weapon/garb, 2 ring, 2 relic),
+  -- since a plain table constraint can't cleanly express "at most 2".
+  equipped_at  timestamptz,
+  created_at   timestamptz not null default now()
+);
+create index if not exists idx_equipment_profile on equipment(profile_id);
+create index if not exists idx_equipment_equipped on equipment(profile_id, slot) where equipped_at is not null;
+
 -- solo enemies: the mob catalog for the single ongoing "Current Battle"
 -- (separate from guild_bosses, which are per-guild and idle-fed). A player
 -- fights a PACK of 1-30 of these at once (see player_combat.pack and
@@ -539,6 +570,7 @@ alter table guild_boss_damage_log enable row level security;
 alter table guild_requests enable row level security;
 alter table items enable row level security;
 alter table inventory enable row level security;
+alter table equipment enable row level security;
 alter table enemies enable row level security;
 alter table player_combat enable row level security;
 alter table chat_messages enable row level security;
@@ -585,6 +617,10 @@ create policy "item catalog is publicly readable" on items for select using (tru
 
 drop policy if exists "players see only their own inventory" on inventory;
 create policy "players see only their own inventory" on inventory
+  for select using (profile_id = auth.uid());
+
+drop policy if exists "players see only their own equipment" on equipment;
+create policy "players see only their own equipment" on equipment
   for select using (profile_id = auth.uid());
 
 drop policy if exists "enemy catalog is publicly readable" on enemies;
@@ -1477,6 +1513,32 @@ begin
 end;
 $$;
 
+-- loot_drop: declared here, well ahead of roll_loot() itself (see the
+-- itemization section below, "4c-3"), purely because resolve_combat_action()
+-- just below declares a "loot_row loot_drop" variable in its own DECLARE
+-- block. Unlike an ordinary function call in a plpgsql BODY (resolved lazily
+-- at first execution, so forward references to a not-yet-created function
+-- are fine), a DECLARE-block variable's type is resolved at CREATE FUNCTION
+-- time -- so loot_drop has to already exist as a type before
+-- resolve_combat_action() itself gets created, not merely by the time
+-- anything calls it. BUGFIX: this type used to be declared down in the
+-- itemization section instead, which worked on this dev box purely by
+-- accident (the type object had persisted there from an earlier, separate
+-- run and was never actually missing when schema.sql got re-applied) but
+-- broke on a truly fresh database -- e.g. Supabase's SQL editor against a
+-- clean project -- with 'ERROR: type "loot_drop" does not exist' right at
+-- resolve_combat_action()'s declare line. Keep this type declared here,
+-- ahead of resolve_combat_action(), even though roll_loot() (the function
+-- that actually builds one) still lives with the rest of the itemization
+-- code further down.
+drop type if exists loot_drop cascade;
+create type loot_drop as (
+  slot   text,
+  rarity text,
+  name   text,
+  mods   jsonb
+);
+
 -- Shared combat core, extracted from what used to be strike_enemy()'s whole
 -- body so the exact same one-action-worth-of-fighting logic can run from two
 -- places: strike_enemy() itself (one call, while the player is online and
@@ -1504,7 +1566,15 @@ create type combat_action_result as (
   gold_gained int,
   xp_lost int,
   gold_lost int,
-  round_log jsonb
+  round_log jsonb,
+  -- one entry per item rolled this call (see the drop hook below), each
+  -- {"slot":..,"rarity":..,"name":..,"mods":..} -- shaped to insert
+  -- straight into the equipment table, which is exactly what the two
+  -- callers (strike_enemy()/perform_idle_tick()) do with it. Always an
+  -- array, usually empty -- resolve_combat_action() itself never touches
+  -- the database (see its own "pure" contract above), so it can only hand
+  -- drops back for the caller to persist, not write them itself.
+  loot_drops jsonb
 );
 
 -- p is the player's profiles row (read-only here -- its gold/xp/hp columns
@@ -1513,14 +1583,20 @@ create type combat_action_result as (
 -- xp_lost/gold_lost for the caller to apply). p_build_log lets a caller
 -- skip round-by-round jsonb log construction (strike_enemy() wants it for
 -- client playback; perform_idle_tick()'s offline loop, which can run this
--- hundreds of times in one call, does not).
+-- hundreds of times in one call, does not). p_gear_mods is an ARRAY of mod
+-- bundles, one per currently-equipped item (same shape sum_mods() already
+-- takes for debuff/affix bundles below) -- fetched by the caller from the
+-- equipment table, since this function stays "pure" (no DB reads, see
+-- above) and can't look equipped gear up itself. Defaults to empty so
+-- every existing call site keeps working unchanged.
 create or replace function resolve_combat_action(
   p profiles,
   p_cur_pack jsonb,
   p_cur_player_hp int,
   p_affix_keys jsonb,
   p_debuff_keys jsonb,
-  p_build_log boolean default true
+  p_build_log boolean default true,
+  p_gear_mods jsonb default '[]'::jsonb
 )
 returns combat_action_result
 language plpgsql
@@ -1586,6 +1662,15 @@ declare
   -- no-op one).
   new_affix_keys jsonb;
   new_debuff_keys jsonb;
+  -- Loot: rolled once per "kill" (a pack clear -- see the total_kills
+  -- increment below, the same event xp/gold/daily_kills already key off),
+  -- not per individual pack member, and not scaled by pack size -- same
+  -- simplification reward_mult already leans on (a bigger pack just pays
+  -- out more xp/gold per clear, via reward_mult, rather than this also
+  -- needing its own pack-size-aware curve). drop_chance is a flat -- TUNE.
+  drop_chance numeric := 0.15;
+  total_loot jsonb := '[]'::jsonb;
+  loot_row loot_drop;
 begin
   new_affix_keys := p_affix_keys;
   new_debuff_keys := p_debuff_keys;
@@ -1595,7 +1680,15 @@ begin
   select coalesce(jsonb_agg(mods), '[]'::jsonb) into affix_mod_bundles
     from affix_defs where key in (select jsonb_array_elements_text(p_affix_keys));
   select coalesce(mods, '{}'::jsonb) into class_mods from class_defs where key = p.class;
-  player_mods := sum_mods(debuff_mod_bundles || jsonb_build_array(coalesce(class_mods, '{}'::jsonb)));
+  -- gear (p_gear_mods) merges in alongside debuffs and the class bonus --
+  -- same "just another bundle in the sum_mods() pile" treatment, so
+  -- equipped standard-stat gear (helm/weapon/garb/ring) affects combat the
+  -- moment it's equipped, no separate code path needed. Relic-only keys
+  -- that may be present in p_gear_mods (from an equipped Relic) pass
+  -- through into player_mods harmlessly -- nothing calls mod_val() for
+  -- those keys yet (see roll_loot()'s comment above), so they just sit
+  -- unread until that follow-up pass wires them up.
+  player_mods := sum_mods(debuff_mod_bundles || p_gear_mods || jsonb_build_array(coalesce(class_mods, '{}'::jsonb)));
   enemy_mods := sum_mods(affix_mod_bundles);
 
   -- attack_speed_pct (a class-bonus-only key so far -- see class_defs) is
@@ -1760,7 +1853,10 @@ begin
       -- how much harder the player's own selections made this fight.
       select coalesce(sum((e->>'xp')::int), 0), coalesce(sum((e->>'gold')::int), 0)
         into pack_xp, pack_gold from jsonb_array_elements(cur_pack) e;
-      pack_xp := round(pack_xp * reward_mult);
+      -- xp_gain_pct (relic-only, see roll_loot() above): a straight bonus
+      -- multiplier on top of reward_mult's difficulty-selection scaling --
+      -- gold has no matching relic stat (yet), so pack_gold stays as-is.
+      pack_xp := round(pack_xp * reward_mult * (1 + mod_val(player_mods, 'xp_gain_pct') / 100.0));
       pack_gold := round(pack_gold * reward_mult);
 
       -- No separate heal here anymore -- the kill that just cleared this
@@ -1779,6 +1875,18 @@ begin
       total_kills := total_kills + 1;
       total_xp := total_xp + pack_xp;
       total_gold := total_gold + pack_gold;
+
+      -- Loot roll: see drop_chance's declaration above for why this fires
+      -- once per pack clear rather than per pack member. item_find_pct
+      -- (relic-only, see roll_loot() above) boosts the roll itself, not
+      -- drop_chance's stored value, so it never permanently drifts.
+      if random() < drop_chance * (1 + mod_val(player_mods, 'item_find_pct') / 100.0) then
+        loot_row := roll_loot();
+        total_loot := total_loot || jsonb_build_array(jsonb_build_object(
+          'slot', loot_row.slot, 'rarity', loot_row.rarity,
+          'name', loot_row.name, 'mods', loot_row.mods
+        ));
+      end if;
 
       -- roll the next pack now so it's ready and waiting, but STOP here —
       -- this tick's fight is over the moment the pack clears, even with
@@ -1876,6 +1984,7 @@ begin
   res.xp_lost := total_xp_lost;
   res.gold_lost := total_gold_lost;
   res.round_log := round_log;
+  res.loot_drops := total_loot;
   return res;
 end;
 $$;
@@ -1905,7 +2014,8 @@ returns table (
                           -- maybeShowWelcomeBackSummary in app.js)
   combat_kills int,      -- this catch-up's own simulated kills/deaths/spend
   combat_deaths int,     -- -- NOT the daily_* whole-day aggregates above,
-  actions_spent int       -- just what this one call simulated
+  actions_spent int,      -- just what this one call simulated
+  loot_drops jsonb        -- everything the offline combat loop rolled, see combat_action_result.loot_drops -- can be several items after a long catch-up, not just one
 )
 language plpgsql
 security definer
@@ -1956,6 +2066,34 @@ declare
   -- (TICK_INTERVAL_MS in app.js) -- so a player who was away fights through
   -- roughly the same pace of action they'd have spent watching the screen.
   seconds_per_action int := 8; -- TUNE: keep in sync with TICK_INTERVAL_MS
+  -- BUGFIX (reported "combat isn't moving any health bars / always wins"):
+  -- last_tick_at is updated unconditionally on every call to this function
+  -- (see the profiles update below), and doTick() in app.js calls this RPC
+  -- on EVERY routine TICK_INTERVAL_MS poll, not just on reconnect -- so
+  -- elapsed_seconds was landing at ~8s on essentially every single online
+  -- tick, and because seconds_per_action == TICK_INTERVAL_MS/1000, that
+  -- produced n_actions=1 every 8s while the player was sitting right there
+  -- watching the screen. This function's own combat catch-up ran a full,
+  -- SILENT (p_build_log=false) fight and then stamped player_combat's
+  -- last_strike_at, which is the exact timestamp strike_enemy()'s cooldown
+  -- gate reads -- so the very next call (autoStrikeEnemy(), doTick()'s
+  -- other half, the ONLY path that ever builds an animated rounds_log) got
+  -- gated out as "on cooldown" and returned a no-op almost every time. Net
+  -- effect: real combat kept happening, constantly, but entirely inside
+  -- this invisible call -- the client only ever saw the pack snap straight
+  -- to its post-fight state with nothing to animate, and because it was
+  -- fighting on every single 8s tick (not once per tick like the online
+  -- path was supposed to), overpowered early fights read as "always wins."
+  -- Fix: only let the catch-up combat loop actually spend actions once
+  -- elapsed_seconds clears combat_catchup_min_seconds, comfortably above
+  -- one routine online tick (8s) plus RPC round-trip jitter, but still far
+  -- below any real "stepped away" gap -- so routine online polling leaves
+  -- combat entirely to the visible strike_enemy() path (as designed), and
+  -- this function's own combat catch-up only kicks in for a genuine gap
+  -- (background-tab throttling, a closed tab, a reconnect). The passive
+  -- xp/gold trickle above is unaffected -- it's harmless and intended to
+  -- run every tick regardless of gap size.
+  combat_catchup_min_seconds int := 20; -- TUNE: must stay > TICK_INTERVAL_MS/1000
   n_actions int;
   combat_pack jsonb;
   combat_hp int;
@@ -1970,6 +2108,9 @@ declare
   combat_gold int := 0;
   combat_xp_lost int := 0;
   combat_gold_lost int := 0;
+  combat_loot jsonb := '[]'::jsonb;
+  dropped_items jsonb := '[]'::jsonb;
+  gear_mods jsonb;
   i int;
 begin
   select * into p from profiles where id = auth.uid() for update;
@@ -1983,19 +2124,36 @@ begin
     return query select 0::bigint, 0::bigint, p.level, 0::bigint,
       daily.daily_dmg_dealt, daily.daily_dmg_taken, daily.daily_kills, daily.daily_deaths,
       daily.daily_idle_xp, daily.daily_idle_gold, daily.daily_reset_at,
-      greatest(0, elapsed_seconds), 0, 0, 0;
+      greatest(0, elapsed_seconds), 0, 0, 0, '[]'::jsonb;
     return;
   end if;
 
+  -- Fetched once up front, not just inside the n_actions>0 branch below --
+  -- xp_gain_pct (relic-only, see roll_loot() in the itemization section)
+  -- boosts the PASSIVE trickle too, not just combat xp, so it has to be
+  -- available even on a call that does no fighting at all. equip/unequip
+  -- only ever happens via their own RPCs (never mid-catch-up), so what's
+  -- equipped can't change across this call regardless of how long it runs.
+  select coalesce(jsonb_agg(mods), '[]'::jsonb) into gear_mods
+    from equipment where profile_id = auth.uid() and equipped_at is not null;
+
   depth_multiplier := 1 + (p.depth * 0.5); -- TUNE: each Depth is +50% base income
-  gained_xp := floor(elapsed_seconds * xp_per_second * depth_multiplier);
+  gained_xp := floor(elapsed_seconds * xp_per_second * depth_multiplier * (1 + mod_val(sum_mods(gear_mods), 'xp_gain_pct') / 100.0));
   gained_gold := floor(elapsed_seconds * gold_per_second * depth_multiplier);
 
   -- How many actions can this catch-up simulate? Capped by BOTH real
   -- elapsed time (at one action per seconds_per_action) AND the player's
   -- actual action pool -- an empty pool means no fighting happens no matter
   -- how long they were away, same as if they'd been online and run dry.
-  n_actions := least(p.actions, floor(elapsed_seconds / seconds_per_action)::int);
+  -- Gated on combat_catchup_min_seconds first (see its declaration above) --
+  -- a routine online poll (elapsed ~8s) simulates zero actions here and
+  -- leaves the fight entirely to strike_enemy(); only a genuine gap spends
+  -- actions and fights silently in this loop.
+  if elapsed_seconds >= combat_catchup_min_seconds then
+    n_actions := least(p.actions, floor(elapsed_seconds / seconds_per_action)::int);
+  else
+    n_actions := 0;
+  end if;
 
   sim_p := p;
 
@@ -2013,7 +2171,7 @@ begin
     -- happen live, so skip building a per-round jsonb log across what could
     -- be hundreds of iterations.
     for i in 1..n_actions loop
-      res := resolve_combat_action(sim_p, combat_pack, combat_hp, combat_affix_keys, combat_debuff_keys, false);
+      res := resolve_combat_action(sim_p, combat_pack, combat_hp, combat_affix_keys, combat_debuff_keys, false, gear_mods);
 
       combat_pack := res.cur_pack;
       combat_hp := res.cur_player_hp;
@@ -2028,6 +2186,7 @@ begin
       combat_gold := combat_gold + res.gold_gained;
       combat_xp_lost := combat_xp_lost + res.xp_lost;
       combat_gold_lost := combat_gold_lost + res.gold_lost;
+      combat_loot := combat_loot || res.loot_drops;
 
       sim_p.gold := greatest(0, sim_p.gold + res.gold_gained - res.gold_lost);
       sim_p.xp := greatest(0, sim_p.xp + res.xp_gained - res.xp_lost);
@@ -2074,6 +2233,24 @@ begin
         last_active_at = now()
     where id = p.id;
 
+  -- Persist whatever the offline combat loop rolled across all n_actions
+  -- iterations, one batch insert rather than one per iteration -- same
+  -- "accumulate in memory, write once" discipline as everything else in
+  -- this loop. See strike_enemy()'s matching insert for why RETURNING
+  -- straight into dropped_items rather than just re-using combat_loot.
+  if jsonb_array_length(combat_loot) > 0 then
+    with ins as (
+      insert into equipment (profile_id, slot, rarity, name, mods)
+      select p.id, d->>'slot', d->>'rarity', d->>'name', d->'mods'
+      from jsonb_array_elements(combat_loot) d
+      returning id, slot, rarity, name, mods
+    )
+    select coalesce(jsonb_agg(jsonb_build_object(
+      'id', ins.id, 'slot', ins.slot, 'rarity', ins.rarity, 'name', ins.name, 'mods', ins.mods
+    )), '[]'::jsonb) into dropped_items
+    from ins;
+  end if;
+
   select * into daily from bump_daily_stats(
     p_dmg_dealt := combat_damage_dealt, p_dmg_taken := combat_damage_taken,
     p_kills := combat_kills, p_deaths := combat_deaths,
@@ -2101,7 +2278,7 @@ begin
   return query select gained_xp + combat_xp, gained_gold + combat_gold, lvl, dmg,
     daily.daily_dmg_dealt, daily.daily_dmg_taken, daily.daily_kills, daily.daily_deaths,
     daily.daily_idle_xp, daily.daily_idle_gold, daily.daily_reset_at,
-    elapsed_seconds, combat_kills, combat_deaths, n_actions;
+    elapsed_seconds, combat_kills, combat_deaths, n_actions, dropped_items;
 end;
 $$;
 
@@ -2112,6 +2289,10 @@ $$;
 -- the caller -- the drop below (same "(text)" arg-type signature as the
 -- p_enemy_key version) already covers this transition too).
 drop function if exists strike_enemy(text);
+-- return type is changing again this round (loot_drops added) -- same
+-- "create or replace can't change OUT-param row type" issue perform_idle_tick()
+-- already has its own standing drop for above; strike_enemy() needs one now too.
+drop function if exists strike_enemy();
 
 -- Thin wrapper around resolve_combat_action() (see above): owns the DB I/O
 -- (one profiles/player_combat read, one action/cooldown gate, one write of
@@ -2142,7 +2323,8 @@ returns table (
   daily_deaths int,
   daily_idle_xp int,
   daily_idle_gold int,
-  daily_reset_at date
+  daily_reset_at date,
+  loot_drops jsonb -- see combat_action_result.loot_drops -- each entry here also carries the new equipment row's id, for an "equip now" action straight off the drop notification
 )
 language plpgsql
 security definer
@@ -2156,6 +2338,8 @@ declare
   cur_actions int;
   daily record;
   res combat_action_result;
+  dropped_items jsonb := '[]'::jsonb;
+  gear_mods jsonb;
 begin
   select * into p from profiles where id = auth.uid() for update;
   if not found then raise exception 'no profile'; end if;
@@ -2170,7 +2354,7 @@ begin
     return query select 0, 0, 0, 0, p.hp, p.max_hp, 0, 0, p.actions, true,
       '[]'::jsonb, coalesce(pc.pack, '[]'::jsonb), '[]'::jsonb, '[]'::jsonb, 0, 0,
       daily.daily_dmg_dealt, daily.daily_dmg_taken, daily.daily_kills, daily.daily_deaths,
-      daily.daily_idle_xp, daily.daily_idle_gold, daily.daily_reset_at;
+      daily.daily_idle_xp, daily.daily_idle_gold, daily.daily_reset_at, '[]'::jsonb;
     return;
   end if;
 
@@ -2179,7 +2363,7 @@ begin
     return query select 0, 0, 0, 0, p.hp, p.max_hp, 0, 0, p.actions, false,
       '[]'::jsonb, coalesce(pc.pack, '[]'::jsonb), '[]'::jsonb, '[]'::jsonb, 0, 0,
       daily.daily_dmg_dealt, daily.daily_dmg_taken, daily.daily_kills, daily.daily_deaths,
-      daily.daily_idle_xp, daily.daily_idle_gold, daily.daily_reset_at;
+      daily.daily_idle_xp, daily.daily_idle_gold, daily.daily_reset_at, '[]'::jsonb;
     return;
   end if;
 
@@ -2188,7 +2372,10 @@ begin
 
   cur_actions := p.actions - action_cost; -- spent once, up front, no matter how the fight goes
 
-  res := resolve_combat_action(p, pc.pack, p.hp, pc.affix_keys, pc.debuff_keys, true);
+  select coalesce(jsonb_agg(mods), '[]'::jsonb) into gear_mods
+    from equipment where profile_id = auth.uid() and equipped_at is not null;
+
+  res := resolve_combat_action(p, pc.pack, p.hp, pc.affix_keys, pc.debuff_keys, true, gear_mods);
 
   update profiles
     -- least(): resolve_combat_action() clamps cur_player_hp against an
@@ -2213,13 +2400,30 @@ begin
         updated_at = now(), last_strike_at = now()
     where profile_id = auth.uid();
 
+  -- Persist any rolled drops (see resolve_combat_action()'s loot_drops --
+  -- that function is pure and never touches the database itself). RETURNING
+  -- straight into dropped_items so the client's response also carries each
+  -- new item's real id, not just its rolled contents.
+  if jsonb_array_length(res.loot_drops) > 0 then
+    with ins as (
+      insert into equipment (profile_id, slot, rarity, name, mods)
+      select p.id, d->>'slot', d->>'rarity', d->>'name', d->'mods'
+      from jsonb_array_elements(res.loot_drops) d
+      returning id, slot, rarity, name, mods
+    )
+    select coalesce(jsonb_agg(jsonb_build_object(
+      'id', ins.id, 'slot', ins.slot, 'rarity', ins.rarity, 'name', ins.name, 'mods', ins.mods
+    )), '[]'::jsonb) into dropped_items
+    from ins;
+  end if;
+
   return query select res.rounds_run, res.damage_dealt, res.kills, res.deaths, res.cur_player_hp, res.cur_player_max_hp,
     res.xp_gained, res.gold_gained, cur_actions, false, res.round_log, res.cur_pack,
     (select coalesce(jsonb_agg(name), '[]'::jsonb) from affix_defs where key in (select jsonb_array_elements_text(res.new_affix_keys))),
     (select coalesce(jsonb_agg(name), '[]'::jsonb) from debuff_defs where key in (select jsonb_array_elements_text(res.new_debuff_keys))),
     res.xp_lost, res.gold_lost,
     daily.daily_dmg_dealt, daily.daily_dmg_taken, daily.daily_kills, daily.daily_deaths,
-    daily.daily_idle_xp, daily.daily_idle_gold, daily.daily_reset_at;
+    daily.daily_idle_xp, daily.daily_idle_gold, daily.daily_reset_at, dropped_items;
 end;
 $$;
 
@@ -2267,6 +2471,275 @@ as $$
     round(8  + 12.0 * (least(100, greatest(1, p_level)) - 1) / 99.0)::int,
     round(6  + 9.0  * (least(100, greatest(1, p_level)) - 1) / 99.0)::int,
     round(30 + 45.0 * (least(100, greatest(1, p_level)) - 1) / 99.0)::int;
+$$;
+
+-- ----------------------------------------------------------------------------
+-- 4c-3. Itemization: procedural gear drops
+--    roll_loot() is a pure function (same "no DB reads, no auth.uid()"
+--    contract as resolve_combat_action() above, and called FROM there on
+--    every pack clear -- see the drop hook further down) that rolls a
+--    complete piece of gear from nothing: a slot, a rarity, a flavor name,
+--    and a stat-mod bundle, all in one shot. Nothing here reads from a
+--    table -- the name/stat pools are plain PL/pgSQL arrays baked into the
+--    function body, Diablo-affix-style procedural generation rather than a
+--    fixed item catalog (deliberately: see the `equipment` table comment
+--    above for why gear doesn't fit the items/inventory catalog pattern).
+--
+--    Slot odds are weighted by how many of that slot you can actually
+--    equip at once (1x helm/weapon/garb, 2x ring/relic, out of 7 total) --
+--    not a flavor choice, just matching physical slot count.
+--
+--    Rarity odds (out of 1000, i.e. tenths of a percent) are the numbers
+--    worked out with the player: junk 45%, common 30%, rare 15%, epic 7%,
+--    legendary 2.4%, Void Touched 0.5%, Void Spiraled 0.1% -- a clean 100%
+--    split where white/green alone cover most drops (routine vendor trash),
+--    each tier up roughly halves or better, and the two Void tiers sit
+--    meaningfully further out than a normal legendary since they're meant
+--    to be long-term chase items, not just "the best normal rarity."
+--
+--    Stat rolls differ by slot family, matching what the player asked for:
+--    helm/weapon/garb/ring roll from the six STANDARD stats (the same
+--    _pct/_flat mod keys class_defs/affix_defs/debuff_defs already use,
+--    picking DISTINCT keys per item at a magnitude scaled by rarity);
+--    relic rolls from the eleven RELIC-ONLY stats in DESIGN.md §3a, using
+--    that section's own "N% per roll" convention instead (each roll adds a
+--    small FIXED amount to a randomly chosen relic key, so a high-rarity
+--    relic can stack the same stat multiple times over rather than always
+--    spreading across distinct ones). junk (0 rolls) always comes back
+--    with empty mods -- pure sell fodder, nothing to equip for.
+--
+--    IMPORTANT, not yet done: nine of the eleven relic-only mod keys this
+--    rolls (life_steal_pct, dodge_flat, block_flat, parry_flat, riposte_flat,
+--    thorns_flat, bristle_back_pct, bleed_pct, abyssal_touch_flat) are
+--    brand new -- nothing in compute_damage()/resolve_combat_action() reads
+--    any of them yet, so a rolled/equipped Relic carrying only these sits
+--    inert in combat today the same way Speed itself did before Evasion was
+--    wired in (see resolve_combat_action()'s cur_player_evasion_pct comment).
+--    Implementing each of those nine mechanics (life steal healing, a
+--    dodge/block/parry/riposte defensive-roll layer, a damage-over-time
+--    bleed, a thorns reflect, abyssal bonus damage) is real per-mechanic
+--    design work, left for a follow-up pass -- this one lays the
+--    itemization foundation (drops, rarity, slots, equip/unequip, and the
+--    standard-stat slots DOING something in combat) without trying to also
+--    invent nine new combat mechanics in the same round.
+--
+--    The other two relic keys, xp_gain_pct and item_find_pct, are NOT part
+--    of that inert set -- they're simple economy multipliers with no new
+--    combat mechanic to design, so they were wired live from day one: see
+--    the relic_pool comment just below, and resolve_combat_action()'s
+--    pack_xp line / drop_chance check, plus perform_idle_tick()'s passive
+--    trickle formula.
+--
+--    loot_drop itself (the type roll_loot() returns) is declared earlier in
+--    this file, right before resolve_combat_action() -- see that type's own
+--    comment for why (a DECLARE-block variable there needs it to already
+--    exist at CREATE FUNCTION time, not just by the time anyone calls it).
+
+create or replace function roll_loot()
+returns loot_drop
+language plpgsql
+as $$
+declare
+  result loot_drop;
+  slots text[] := array['helm','weapon','garb','ring','ring','relic','relic'];
+  rarities text[] := array['junk','common','rare','epic','legendary','void_touched','void_spiraled'];
+  rarity_weights numeric[] := array[450,300,150,70,24,5,1]; -- out of 1000 -- see comment above
+  roll_counts int[] :=       array[0,  1,  2,  3,  4, 4,  5]; -- distinct-stat-rolls per rarity, same index
+  standard_pool text[] := array['attack_pct','defense_pct','hp_pct','attack_speed_pct','crit_chance_flat','multi_strike_flat','speed_pct','evasion_flat'];
+  -- xp_gain_pct/item_find_pct are the two "economy" relic stats -- unlike
+  -- the other nine (see roll_loot()'s IMPORTANT comment above), these ARE
+  -- consumed already: xp_gain_pct boosts pack_xp below and perform_idle_tick()'s
+  -- passive trickle, item_find_pct boosts drop_chance below. Simple
+  -- multipliers, no new combat mechanic to design, so no reason to ship
+  -- them inert like the defensive/offensive relic stats.
+  relic_pool text[] := array['life_steal_pct','dodge_flat','block_flat','parry_flat','riposte_flat','thorns_flat','bristle_back_pct','bleed_pct','abyssal_touch_flat','xp_gain_pct','item_find_pct'];
+  -- fixed per-roll amount for relic stats, per DESIGN.md §3a's own
+  -- "1% per roll" convention (Thorns is the one flat-damage exception there,
+  -- "5 per roll"; Abyssal Touch has no stated rate in DESIGN.md, so it's
+  -- given a comparable small flat bite here, 3 per roll -- TUNE).
+  relic_per_roll jsonb := '{
+    "life_steal_pct": 1, "dodge_flat": 1, "block_flat": 1, "parry_flat": 1,
+    "riposte_flat": 1, "thorns_flat": 5, "bristle_back_pct": 1, "bleed_pct": 1,
+    "abyssal_touch_flat": 3, "xp_gain_pct": 2, "item_find_pct": 3
+  }'::jsonb;
+  mag_ranges jsonb := '{
+    "common": [2,5], "rare": [4,8], "epic": [7,12], "legendary": [12,20],
+    "void_touched": [20,30], "void_spiraled": [30,45]
+  }'::jsonb;
+  base_names jsonb := '{
+    "helm":   ["Hollow Circlet","Voidwrought Helm","Bone Coif","Wraithguard Hood","Abyssal Faceplate"],
+    "weapon": ["Void-Forged Blade","Rift Cleaver","Bonesaw Dagger","Wraithsteel Axe","Hollow Spear"],
+    "garb":   ["Tattered Void Robe","Umbral Vestments","Hollowweave Armor","Wraithhide Cloak","Abyssal Plate"],
+    "ring":   ["Bone Loop","Void-Touched Band","Wraith Signet","Hollow Ring","Abyssal Loop"],
+    "relic":  ["Whispering Shard","Void Idol","Hollow Talisman","Wraith Charm","Abyssal Sigil"]
+  }'::jsonb;
+  rarity_adjectives jsonb := '{
+    "junk": "Crude", "common": "", "rare": "Sturdy", "epic": "Exquisite",
+    "legendary": "Mythic", "void_touched": "Voidtouched", "void_spiraled": "Void-Spiraled"
+  }'::jsonb;
+  stat_display_names jsonb := '{
+    "attack_pct": "Power", "defense_pct": "Defense", "hp_pct": "Vitality",
+    "attack_speed_pct": "Haste", "crit_chance_flat": "Precision",
+    "multi_strike_flat": "Fury", "speed_pct": "Swiftness", "evasion_flat": "Evasion",
+    "life_steal_pct": "the Leech", "dodge_flat": "Dodging", "block_flat": "Blocking",
+    "parry_flat": "Parrying", "riposte_flat": "the Riposte", "thorns_flat": "Thorns",
+    "bristle_back_pct": "the Bristle", "bleed_pct": "the Wound", "abyssal_touch_flat": "the Abyss",
+    "xp_gain_pct": "the Scholar", "item_find_pct": "Fortune"
+  }'::jsonb;
+  chosen_slot text;
+  chosen_rarity text;
+  n_rolls int;
+  pool text[];
+  available text[];
+  picked_idx int;
+  picked_key text;
+  mods jsonb := '{}'::jsonb;
+  lo numeric;
+  hi numeric;
+  r numeric;
+  cum numeric := 0;
+  i int;
+  base_name text;
+  adjective text;
+  suffix text := '';
+  first_key text;
+begin
+  chosen_slot := slots[1 + floor(random() * array_length(slots,1))::int];
+
+  r := random() * 1000;
+  for i in 1..array_length(rarities,1) loop
+    cum := cum + rarity_weights[i];
+    if r < cum then
+      chosen_rarity := rarities[i];
+      n_rolls := roll_counts[i];
+      exit;
+    end if;
+  end loop;
+  if chosen_rarity is null then -- floating-point edge guard, practically never hit
+    chosen_rarity := rarities[array_length(rarities,1)];
+    n_rolls := roll_counts[array_length(roll_counts,1)];
+  end if;
+
+  if chosen_slot = 'relic' then
+    pool := relic_pool;
+    -- relic rolls stack: repeats on the same key ADD rather than reroll,
+    -- matching "N% per roll" reading multiple rolls as multiple stacks.
+    for i in 1..n_rolls loop
+      picked_key := pool[1 + floor(random() * array_length(pool,1))::int];
+      mods := jsonb_set(mods, array[picked_key],
+        to_jsonb(coalesce((mods->>picked_key)::numeric, 0) + (relic_per_roll->>picked_key)::numeric));
+    end loop;
+  else
+    pool := standard_pool;
+    available := pool;
+    n_rolls := least(n_rolls, array_length(pool,1));
+    if n_rolls > 0 then
+      lo := (mag_ranges->chosen_rarity->>0)::numeric;
+      hi := (mag_ranges->chosen_rarity->>1)::numeric;
+    end if;
+    -- standard-stat rolls pick DISTINCT keys, each at a random magnitude in
+    -- this rarity's range -- unlike relic stacking, there's no flavor
+    -- reason for a weapon to roll +Power twice instead of +Power and
+    -- +Crit, so each roll removes its key from the pool before the next.
+    for i in 1..n_rolls loop
+      picked_idx := 1 + floor(random() * array_length(available,1))::int;
+      picked_key := available[picked_idx];
+      available := available[1:picked_idx-1] || available[picked_idx+1:array_length(available,1)];
+      mods := jsonb_set(mods, array[picked_key], to_jsonb(round(lo + random() * (hi - lo))::int));
+    end loop;
+  end if;
+
+  base_name := (base_names->chosen_slot)->>(floor(random() * jsonb_array_length(base_names->chosen_slot))::int);
+  adjective := coalesce(rarity_adjectives->>chosen_rarity, '');
+
+  select key into first_key from jsonb_object_keys(mods) as key limit 1;
+  if first_key is not null then
+    suffix := ' of ' || (stat_display_names->>first_key);
+  end if;
+
+  result.slot := chosen_slot;
+  result.rarity := chosen_rarity;
+  result.name := trim(both ' ' from (case when adjective = '' then '' else adjective || ' ' end) || base_name || suffix);
+  result.mods := mods;
+  return result;
+end;
+$$;
+
+-- equip_item/unequip_item: the only two ways an equipment row's equipped_at
+-- ever changes. Both are ownership-checked against auth.uid() (equipment's
+-- RLS select policy already restricts reads the same way, but these run
+-- SECURITY DEFINER so they filter by hand rather than relying on RLS).
+-- Both return the caller's whole equipment set afterward so the client can
+-- just refresh its inventory/equipped view in one round trip instead of a
+-- second read.
+--
+-- Ring/Relic each have 2 physical boxes but share ONE slot value ('ring'/
+-- 'relic') in the table -- equip_item() only tracks "how many of this slot
+-- are currently equipped", not which of the two boxes a given ring sits in,
+-- since that distinction is purely a client-side rendering choice (both
+-- rings' mods sum into combat identically regardless of which box either
+-- one is drawn in).
+--
+-- p_unequip_id is deliberately opt-in, not an automatic "swap out the
+-- oldest" -- with 2 ring slots there's no single obvious "oldest" choice to
+-- silently make on the player's behalf, so a full slot raises an exception
+-- naming what's needed (a specific item to unequip first) rather than
+-- guessing.
+create or replace function equip_item(p_equipment_id uuid, p_unequip_id uuid default null)
+returns setof equipment
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  item equipment%rowtype;
+  slot_cap int;
+  cur_count int;
+begin
+  select * into item from equipment where id = p_equipment_id and profile_id = auth.uid();
+  if not found then
+    raise exception 'item not found';
+  end if;
+  if item.equipped_at is not null then
+    raise exception 'item is already equipped';
+  end if;
+
+  slot_cap := case when item.slot in ('ring', 'relic') then 2 else 1 end;
+
+  select count(*) into cur_count from equipment
+    where profile_id = auth.uid() and slot = item.slot and equipped_at is not null;
+
+  if cur_count >= slot_cap then
+    if p_unequip_id is null then
+      raise exception 'that slot is already full -- pass p_unequip_id to swap something out';
+    end if;
+    update equipment set equipped_at = null
+      where id = p_unequip_id and profile_id = auth.uid() and slot = item.slot and equipped_at is not null;
+    if not found then
+      raise exception 'p_unequip_id does not match a currently-equipped item in that slot';
+    end if;
+  end if;
+
+  update equipment set equipped_at = now() where id = p_equipment_id;
+
+  return query select * from equipment where profile_id = auth.uid() order by slot, equipped_at nulls last;
+end;
+$$;
+
+create or replace function unequip_item(p_equipment_id uuid)
+returns setof equipment
+language plpgsql
+security definer
+set search_path = public
+as $$
+begin
+  update equipment set equipped_at = null
+    where id = p_equipment_id and profile_id = auth.uid() and equipped_at is not null;
+  if not found then
+    raise exception 'item not found or not currently equipped';
+  end if;
+  return query select * from equipment where profile_id = auth.uid() order by slot, equipped_at nulls last;
+end;
 $$;
 
 -- ----------------------------------------------------------------------------
@@ -2397,6 +2870,13 @@ begin
   returning * into p;
 
   delete from inventory where profile_id = p.id;
+  -- gear is possessions, same as inventory above -- wiped on Banishment for
+  -- the same reason: a fresh sacrifice-and-rebirth shouldn't carry forward
+  -- power that isn't the character's own stat retention (see level_stats()
+  -- and this function's own base_attack/defense/max_hp comments above).
+  -- Keeps itemization from ever becoming a second, ungoverned retention
+  -- channel running alongside the real one.
+  delete from equipment where profile_id = p.id;
   delete from player_combat where profile_id = p.id;
 
   return p;
