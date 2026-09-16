@@ -573,8 +573,15 @@
        0.100) if the player explicitly asks for a bigger jump for that
        round. -->
   <script>
-    window.APP_VERSION = "0.019";
+    window.APP_VERSION = "0.020";
     window.PATCH_NOTES = [
+      {
+        "version": "0.020",
+        "notes": [
+          "Fixed a real bug: your Combat Stats panel (Power, Defense, Attack Speed, Crit, Multi Strike, Speed, Evasion) never actually reflected equipped gear -- only your class bonus. Your gear was always working correctly in real fights, it just never showed up on that panel. It does now, and updates the instant you equip or unequip something instead of waiting for the next refresh.",
+          "Vitality (HP%) rolls now show a note next to your HP bar too, since they don't move your permanent Max HP number directly."
+        ]
+      },
       {
         "version": "0.019",
         "notes": [

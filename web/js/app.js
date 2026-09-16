@@ -606,6 +606,40 @@ function formatStatWithClassPct(base, pct) {
   return `${base} (${pct > 0 ? "+" : ""}${pct}%)`;
 }
 
+// The eight standard-stat keys gear can actually roll (roll_loot()'s
+// standard_pool in schema.sql) -- Power/Defense/Vitality/Attack Speed/Crit/
+// Multi Strike/Speed/Evasion. Mirrors RELIC_STAT_ORDER's role for the
+// relic-only keys, just for the slots (Helm/Weapon/Garb/Ring) that roll
+// these instead.
+const STANDARD_GEAR_STAT_KEYS = [
+  "attack_pct", "defense_pct", "hp_pct", "attack_speed_pct",
+  "crit_chance_flat", "multi_strike_flat", "speed_pct", "evasion_flat",
+];
+
+// Sums the eight keys above across every currently-EQUIPPED item, same "just
+// sum whatever's equipped" treatment renderAdditionalAffixes() already uses
+// for the eleven relic-only keys. BUGFIX: renderProfile() below used to only
+// ever factor in the player's class bonus (classMods) -- it never read
+// state.equipment at all, so equipping a Helm/Weapon/Garb/Ring/Relic with a
+// Power/Defense/Vitality/Attack Speed/Crit/Multi Strike/Speed/Evasion roll
+// changed nothing in the Combat Stats panel, even though the server has
+// always applied it correctly in real combat (resolve_combat_action() reads
+// every equipped item's mods via p_gear_mods, verified directly against a
+// local Postgres copy). The gear was never actually inert -- only invisible
+// here, which read as "this stat roll does nothing."
+function computeEquippedGearMods() {
+  const totals = {};
+  (state.equipment || [])
+    .filter((e) => e.equipped_at)
+    .forEach((e) => {
+      Object.entries(e.mods || {}).forEach(([key, val]) => {
+        if (!STANDARD_GEAR_STAT_KEYS.includes(key)) return;
+        totals[key] = (totals[key] || 0) + (Number(val) || 0);
+      });
+    });
+  return totals;
+}
+
 // Mirrors perform_idle_tick()'s level curve in schema.sql exactly --
 // level = floor(sqrt(xp / 100)), floored at a displayed minimum of 1 (which
 // is why level 1's own XP span, 0-400, is twice as wide as every level
@@ -660,26 +694,44 @@ function renderProfile() {
   // keep the base number (gear will actually move that number later) with
   // the class's live percent bonus alongside it; Crit/Multi Strike show
   // the resolved total directly since there's no other source for them yet.
+  // Equipped gear (BUGFIX, see computeEquippedGearMods()'s comment above)
+  // is folded in right alongside the class bonus -- gearPct()/gearFlat()
+  // below just add whatever's currently equipped on top of the class's own
+  // number, mirroring exactly how sum_mods() combines the two server-side.
   const classMods = CLASS_MODS[p.class] || {};
-  $("stat-power").textContent = formatStatWithClassPct(p.attack, classMods.attack_pct);
-  $("stat-defense").textContent = formatStatWithClassPct(p.defense, classMods.defense_pct);
-  $("stat-attack-speed").textContent = formatStatWithClassPct(p.attack_speed, classMods.attack_speed_pct);
-  $("stat-crit").textContent = `${p.crit + (classMods.crit_chance_flat || 0)}%`;
+  const gearMods = computeEquippedGearMods();
+  const gearFlat = (key) => (classMods[key] || 0) + (gearMods[key] || 0);
+  $("stat-power").textContent = formatStatWithClassPct(p.attack, gearFlat("attack_pct"));
+  $("stat-defense").textContent = formatStatWithClassPct(p.defense, gearFlat("defense_pct"));
+  $("stat-attack-speed").textContent = formatStatWithClassPct(p.attack_speed, gearFlat("attack_speed_pct"));
+  $("stat-crit").textContent = `${p.crit + gearFlat("crit_chance_flat")}%`;
   // Crit Damage is its own profiles column (crit_damage), same "raw
   // percentage" shape as Crit itself -- mirrors compute_damage()'s
-  // p_crit_damage/crit_damage_flat in schema.sql.
+  // p_crit_damage/crit_damage_flat in schema.sql. No gear roll grants
+  // crit_damage_flat (not in roll_loot()'s standard_pool), so only the
+  // class bonus applies here -- nothing missing from gearMods.
   $("stat-crit-damage").textContent = `${p.crit_damage + (classMods.crit_damage_flat || 0)}%`;
-  $("stat-multi-strike").textContent = `${p.multi_strike + (classMods.multi_strike_flat || 0)}%`;
-  $("stat-speed").textContent = formatStatWithClassPct(p.speed, classMods.speed_pct);
+  $("stat-multi-strike").textContent = `${p.multi_strike + gearFlat("multi_strike_flat")}%`;
+  $("stat-speed").textContent = formatStatWithClassPct(p.speed, gearFlat("speed_pct"));
   // Evasion is derived from Speed, not its own profiles column -- mirrors
   // cur_player_evasion_pct in strike_enemy() (1 Speed = 1% Evasion, plus
-  // any future evasion_flat mod, hard-capped at 25% total).
-  const evasionPct = Math.min(25, Math.max(0, p.speed + (classMods.evasion_flat || 0)));
+  // any evasion_flat mod from class or gear, hard-capped at 25% total).
+  const evasionPct = Math.min(25, Math.max(0, p.speed + gearFlat("evasion_flat")));
   $("stat-evasion").textContent = `${evasionPct}%`;
 
   const hpPct = Math.max(0, Math.min(100, (p.hp / p.max_hp) * 100));
   $("player-hp-fill").style.width = hpPct + "%";
-  $("player-hp-text").textContent = `${p.hp} / ${p.max_hp} HP`;
+  // Vitality (hp_pct, class + gear) doesn't change p.max_hp itself -- same
+  // "combat-time-only modifier, never written back to the base column"
+  // treatment every other gear stat gets (see resolve_combat_action()'s
+  // cur_player_max_hp in schema.sql) -- but it's still worth surfacing here,
+  // same spirit as the "(+X%)" annotations above, so equipping a Vitality
+  // roll doesn't read as doing nothing just because the bar's raw numbers
+  // don't move.
+  const vitalityPct = gearFlat("hp_pct");
+  $("player-hp-text").textContent = vitalityPct > 0
+    ? `${p.hp} / ${p.max_hp} HP (+${vitalityPct}% Vitality in combat)`
+    : `${p.hp} / ${p.max_hp} HP`;
 
   renderEncounterSettings();
   renderAutoScrapSettings();
@@ -1210,6 +1262,14 @@ async function loadEquipment() {
   renderEquipmentSlots();
   renderInventoryPanel();
   renderAdditionalAffixes();
+  // BUGFIX: renderProfile() reads computeEquippedGearMods() now (see its
+  // comment above), so an equip/unequip needs to re-run it too -- otherwise
+  // the Combat Stats panel would still only catch up on the NEXT profile
+  // poll, reading as "equipping this did nothing" for however long that
+  // takes. state.profile may not be loaded yet on the very first call
+  // (loadEquipment() can run before loadProfile() during initial page load)
+  // -- renderProfile() itself already guards against a null profile.
+  renderProfile();
 }
 
 // Keeps state.equipBoxAssignment in sync with whatever's ACTUALLY equipped
