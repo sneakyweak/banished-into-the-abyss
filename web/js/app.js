@@ -1102,6 +1102,28 @@ const RELIC_STAT_CAPS = {
   abyssal_touch_flat: null, thorns_flat: null, bristle_back_pct: null,
   life_steal_pct: 50, bleed_pct: 25, xp_gain_pct: null, item_find_pct: null,
 };
+// What each relic-only stat actually DOES (DESIGN.md §3a) -- every Combat
+// Stats row already gets one of these (Power/Defense/Crit/etc. in
+// index.html), but the Additional Affixes rows never did: renderAdditionalAffixes()
+// used to only set a tooltip for the six CAPPED stats, and even then it was
+// cap info only ("Capped at 25%"), nothing about what the stat itself does.
+// The other five (Abyssal Touch, Thorns, Bristle Back, Increased XP,
+// Increased Item Find) had no tooltip at all. This is the effect text half;
+// renderAdditionalAffixes() below prepends it to whatever cap/overflow note
+// already applies.
+const RELIC_STAT_TOOLTIPS = {
+  dodge_flat: "Fully dodges an attack (0 damage) when it procs -- rolled at 1% per roll. A separate roll from Speed's own Evasion; either can save you from the same hit.",
+  block_flat: "Halves incoming damage when it procs -- rolled at 1% per roll. Can stack with Parry on the same hit (each is an independent roll).",
+  parry_flat: "Deflects 25% of the incoming damage when it procs -- rolled at 1% per roll. Can stack with Block on the same hit.",
+  riposte_flat: "Returns 25% of the incoming damage back at whoever just hit you when it procs -- rolled at 1% per roll.",
+  abyssal_touch_flat: "Adds flat bonus damage to every hit you land -- rolled at +3 per roll. Applied after crit/mitigation, so it's never itself boosted by a crit.",
+  thorns_flat: "Reflects flat damage back at whichever enemy just hit you -- always fires, not a chance. Rolled at +5 per roll.",
+  bristle_back_pct: "A straight multiplier on your Thorns damage -- rolled at up to 5% per roll.",
+  life_steal_pct: "Heals you for a % of the damage you deal on every landed hit -- rolled at 1% per roll.",
+  bleed_pct: "Makes a target you hit bleed for a % of that hit's damage, ticking once per round for 3 rounds -- rolled at 1% per roll.",
+  xp_gain_pct: "A straight multiplier on all XP gained -- combat kills and the passive idle trickle alike. Rolled at 2% per roll.",
+  item_find_pct: "Boosts your loot drop roll on every pack clear. Rolled at 3% per roll.",
+};
 
 // The "Additional Affixes" section of the Combat Stats panel -- every
 // relic-only stat (RELIC_STAT_ORDER above) summed across all currently-
@@ -1159,11 +1181,16 @@ function renderAdditionalAffixes() {
     const label = document.createElement("span");
     label.className = "stat-label";
     label.textContent = EQ_STAT_LABELS[key] || key;
-    if (cap != null) {
-      label.dataset.tooltip = raw > cap
+    // Every row gets its effect text now, not just the capped ones -- see
+    // RELIC_STAT_TOOLTIPS' comment above for why this used to be missing
+    // for 5 of the 11 stats (and cap-only, no effect text, for the other 6).
+    const effectText = RELIC_STAT_TOOLTIPS[key];
+    const capText = cap == null
+      ? "No cap."
+      : raw > cap
         ? `Capped at ${cap}${suffix} -- you have ${raw}${suffix} rolled, so ${raw - cap}${suffix} of it is currently wasted.`
         : `Capped at ${cap}${suffix}.`;
-    }
+    label.dataset.tooltip = effectText ? `${effectText} ${capText}` : capText;
     const val = document.createElement("span");
     val.textContent = `${effective}${suffix}`;
     li.appendChild(label);
