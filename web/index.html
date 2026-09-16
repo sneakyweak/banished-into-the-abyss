@@ -292,23 +292,61 @@
       <div class="col-side">
         <section class="panel equipment-panel">
           <h2 class="panel-title">Equipment</h2>
-          <p class="log">Not wired up yet — gear will land here once crafting/drops exist.</p>
+          <p class="log">Click a filled slot to unequip. Click "Equip" on a Gear item below to fill an open slot.</p>
           <!-- Helm sits alone, centered above the rest, like a head slot on
                a classic equipment doll -- Weapon now takes the spot in the
-               grid Helm used to occupy. -->
-          <div class="equip-slot equip-slot-centered"><span class="equip-slot-label">Helm</span></div>
+               grid Helm used to occupy. Ring/Relic each have 2 physical
+               boxes but share one slot TYPE server-side (equip_item() only
+               tracks "how many of this slot are equipped", not which box --
+               see its comment in schema.sql) -- the two boxes here are
+               purely a rendering choice, filled in whatever order
+               renderEquipmentSlots() in app.js gets them back in. -->
+          <div id="eq-slot-helm" class="equip-slot equip-slot-centered"><span class="equip-slot-label">Helm</span></div>
           <div class="equip-grid">
-            <div class="equip-slot"><span class="equip-slot-label">Weapon</span></div>
-            <div class="equip-slot"><span class="equip-slot-label">Garb</span></div>
-            <div class="equip-slot"><span class="equip-slot-label">Ring</span></div>
-            <div class="equip-slot"><span class="equip-slot-label">Ring</span></div>
-            <div class="equip-slot"><span class="equip-slot-label">Relic</span></div>
-            <div class="equip-slot"><span class="equip-slot-label">Relic</span></div>
+            <div id="eq-slot-weapon" class="equip-slot"><span class="equip-slot-label">Weapon</span></div>
+            <div id="eq-slot-garb" class="equip-slot"><span class="equip-slot-label">Garb</span></div>
+            <div id="eq-slot-ring-0" class="equip-slot"><span class="equip-slot-label">Ring</span></div>
+            <div id="eq-slot-ring-1" class="equip-slot"><span class="equip-slot-label">Ring</span></div>
+            <div id="eq-slot-relic-0" class="equip-slot"><span class="equip-slot-label">Relic</span></div>
+            <div id="eq-slot-relic-1" class="equip-slot"><span class="equip-slot-label">Relic</span></div>
           </div>
         </section>
 
         <section class="panel inventory-panel">
-          <h2 class="panel-title">Inventory</h2>
+          <div class="inventory-panel-header">
+            <h2 class="panel-title">Inventory</h2>
+            <!-- Bag count is unequipped GEAR only (see persist_loot_drops()
+                 in schema.sql) -- materials/trinkets below use the older
+                 quantity-stacking items/inventory system and aren't bounded
+                 the same way, so they don't count toward this number. The
+                 advertised cap is 250; there's a quiet +10 grace past that
+                 before drops actually start getting auto-scrapped for gold
+                 instead of added (see schema.sql), so this can briefly read
+                 slightly over 250 without anything being lost yet. -->
+            <span id="bag-count" class="bag-count" data-tooltip="Unequipped gear only. A small grace past 250 is fine -- drops only start getting auto-scrapped for gold once the bag is genuinely full.">Bag: 0 / 250</span>
+          </div>
+
+          <!-- Auto-Scrap: per-rarity checkboxes (set_auto_scrap_rarities())
+               -- any rarity checked here is converted straight to gold the
+               instant it drops, never even touching the bag. Clean Bag
+               (cleanup_bag()) applies the same checked list retroactively
+               to whatever's already sitting in the bag right now, in one
+               sweep, so turning on a rarity here doesn't require waiting
+               for it to naturally cycle out. -->
+          <div class="auto-scrap-settings">
+            <p class="log" data-tooltip="Checked rarities are converted straight to gold the moment they drop -- they never take up bag space.">Auto-Scrap</p>
+            <div id="auto-scrap-checks" class="auto-scrap-checks"></div>
+            <button type="button" id="btn-clean-bag" class="btn-ghost btn-small">Clean Bag</button>
+          </div>
+
+          <!-- Unified list: materials (the items/inventory catalog) first
+               under a Materials sub-header, then unequipped gear grouped
+               into per-slot-type sub-headers (Helm/Weapon/Garb/Ring/Relic),
+               each sub-header only rendered when that group has at least
+               one entry. See renderInventoryPanel() in app.js -- it's the
+               single render path for both data sources (state.inventoryRows
+               from loadInventory(), state.equipment from loadEquipment()),
+               so either one refreshing re-renders the whole thing. -->
           <ul id="inventory-list" class="inventory-list">
             <li class="log">Empty.</li>
           </ul>
@@ -317,6 +355,14 @@
     </div>
 
   </main>
+
+  <!-- Item stat popup: one shared, reused element (see showItemPopup()/
+       hideItemPopup() in app.js) rather than one per gear reference --
+       positioned near whichever slot/row triggered it. Hover opens it on
+       desktop; a tap/click toggles it open on mobile (and taps outside
+       close it) -- see the same click-based approach noted on
+       .item-popup's CSS. -->
+  <div id="item-popup" class="item-popup hidden" role="tooltip"></div>
 
   <!-- ============ GUILD OVERLAY ============ -->
   <div id="guild-overlay" class="overlay hidden">
@@ -480,6 +526,17 @@
              otherwise (e.g. the player had no actions left to spend, or was
              only away a few seconds). -->
         <li id="welcome-back-kills-row" class="hidden"><span class="stat-label">Enemies Defeated</span><span id="welcome-back-kills">0</span></li>
+        <!-- Only shown when the offline combat simulation rolled at least
+             one gear drop (see roll_loot() in schema.sql) during this
+             catch-up -- same show/hide convention as Enemies Defeated
+             above. -->
+        <li id="welcome-back-items-row" class="hidden"><span class="stat-label">Items Found</span><span id="welcome-back-items">0</span></li>
+        <!-- Only shown when the offline catch-up auto-scrapped anything --
+             either the player's own auto-scrap rarity settings firing on a
+             drop, or the bag being full enough that overflow got converted
+             to gold instead of added (see persist_loot_drops() in
+             schema.sql). -->
+        <li id="welcome-back-scrapped-row" class="hidden"><span class="stat-label">Auto-Scrapped</span><span id="welcome-back-scrapped">0</span></li>
       </ul>
       <button id="btn-welcome-back-continue">Continue</button>
     </div>
@@ -510,8 +567,34 @@
        0.100) if the player explicitly asks for a bigger jump for that
        round. -->
   <script>
-    window.APP_VERSION = "0.009";
+    window.APP_VERSION = "0.012";
     window.PATCH_NOTES = [
+      {
+        "version": "0.012",
+        "notes": [
+          "Gear has moved into the Inventory panel -- one list for materials and equipment, with unequipped gear sorted into Helm / Weapon / Garb / Ring / Relic sub-headers.",
+          "Your bag now holds up to 250 pieces of gear (plus a 10-item grace buffer) -- past that, new drops are automatically scrapped for gold instead of being lost.",
+          "New Auto-Scrap settings let you pick rarities to convert straight to gold the moment they drop, and a Clean Bag button applies those same rarities to everything already sitting in your inventory.",
+          "Item tooltips now show the level it dropped at.",
+          "Hover over gear (or tap it on mobile) to see its full stats in a popup before you equip, unequip, or scrap it."
+        ]
+      },
+      {
+        "version": "0.011",
+        "notes": [
+          "Landing a kill now fully heals you, up from 25% of max HP -- every enemy you take down tops you right back off."
+        ]
+      },
+      {
+        "version": "0.010",
+        "notes": [
+          "Gear! Enemies now have a chance to drop equipment -- Helm, Weapon, Garb, two Rings, and two Relics -- with seven rarities from Junk all the way up to the ultra-rare Void Spiraled.",
+          "Check the new Gear panel to equip drops and boost your stats. Equipped Helm/Weapon/Garb/Ring gear works right away in combat.",
+          "Relic gear can now drop and be equipped too. Two of its special effects -- Increased XP and Increased Item Find -- are live immediately; the rest (Life Steal, Dodge, Thorns, and so on) aren't active in combat yet -- that's coming in a follow-up patch.",
+          "Banishing now also clears your gear, same as it already did your inventory.",
+          "Fixed a bug where combat while online could resolve silently in the background, making fights look like they weren't moving (or that you always won without a real fight) -- your Strike now always actually shows the round-by-round action."
+        ]
+      },
       {
         "version": "0.009",
         "notes": [

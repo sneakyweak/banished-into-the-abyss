@@ -12,6 +12,9 @@ const state = {
   myRole: null,       // this player's role in state.guild: 'leader' | 'officer' | 'member' | null
   members: [],
   pack: [],            // current enemy pack: [{ enemy_key, name, tier, hp, max_hp, attack, defense, xp, gold }, ...]
+  equipment: [],       // every equipment row the player owns, equipped and not -- see loadEquipment() below, which is the only thing that ever (re)populates this
+  inventoryRows: [],   // materials/trinkets (items/inventory catalog) -- see loadInventory() below. Rendered together with unequipped equipment in one panel, see renderInventoryPanel()
+
   affixNames: [],      // display names of this pack's active affixes (enemy-side modifiers)
   debuffNames: [],     // display names of this pack's active debuffs (player-side, self-imposed)
   // "Daily Totals" -- server-truth (see player_combat.daily_* / bump_daily_stats
@@ -531,6 +534,7 @@ async function enterGame(user) {
   await loadProfile();
   await loadGuildMembership();
   await loadInventory();
+  await loadEquipment();
   await loadPack();
   await loadDailyTotals();
   await loadChatHistory("global");
@@ -670,6 +674,7 @@ function renderProfile() {
   $("player-hp-text").textContent = `${p.hp} / ${p.max_hp} HP`;
 
   renderEncounterSettings();
+  renderAutoScrapSettings();
 }
 
 const LAST_CLASS_KEY = "bita_last_class";
@@ -986,6 +991,26 @@ async function autoStrikeEnemy() {
     msg = `You dealt ${row.damage_dealt} damage over ${roundsText}.`;
   }
   if (row.out_of_actions) msg += " Out of actions.";
+
+  // Gear drops (see roll_loot() in schema.sql): rolled at up to a ~15%
+  // chance per pack clear, already persisted into the equipment table by
+  // strike_enemy() itself -- refresh the Equipment/Gear panels so a new
+  // drop shows up in the Gear list right away, not just after the next
+  // full page reload.
+  if (Array.isArray(row.loot_drops) && row.loot_drops.length > 0) {
+    msg += describeLootDrops(row.loot_drops);
+    await loadEquipment();
+  }
+
+  // Auto-scrap (see persist_loot_drops()/resolve_combat_action() in
+  // schema.sql): either the player's own Auto-Scrap rarity settings caught
+  // a drop, or the bag was full enough that overflow got converted to gold
+  // instead of added. Either way gold changed, so refresh the profile too.
+  if (row.items_scrapped > 0) {
+    msg += ` Auto-scrapped ${row.items_scrapped} item${row.items_scrapped === 1 ? "" : "s"} for ${row.scrap_gold_gained} gold.`;
+    await loadProfile();
+  }
+
   return { message: msg, row };
 }
 
@@ -997,34 +1022,448 @@ async function loadInventory() {
     .gt("quantity", 0)
     .order("quantity", { ascending: false });
   if (error) return console.error(error);
-  renderInventory(data || []);
+  state.inventoryRows = data || [];
+  renderInventoryPanel();
 }
 
-function renderInventory(rows) {
+// ---------------------------------------------------------------------------
+// Equipment: procedurally-rolled gear (see roll_loot()/equip_item() in
+// schema.sql), a separate system from the materials/trinkets catalog above
+// -- every drop is its own row with its own rolled stats, not a shared
+// catalog + quantity. state.equipment holds EVERY row the player owns
+// (equipped and not); renderEquipmentSlots/renderInventoryPanel each filter
+// it down to what they need rather than tracking two separate lists, so a
+// single loadEquipment() after any change (a drop, an equip, an unequip, a
+// scrap, a Banishment wipe) keeps both in sync. Unequipped gear renders
+// inside the same Inventory panel as the materials list above (see
+// renderInventoryPanel() below), sorted into per-slot-type sub-sections --
+// it used to be a separate "Gear" panel.
+// ---------------------------------------------------------------------------
+
+const EQ_SLOT_LABELS = { helm: "Helm", weapon: "Weapon", garb: "Garb", ring: "Ring", relic: "Relic" };
+// Order gear sub-headers render in -- fixed, not alphabetical, so it reads
+// top-to-bottom the same way the Equipment panel's own slot boxes do
+// (Helm, Weapon, Garb, then the two multi-slot types).
+const EQ_SLOT_ORDER = ["helm", "weapon", "garb", "ring", "relic"];
+const EQ_RARITY_LABELS = {
+  junk: "Junk", common: "Common", rare: "Rare", epic: "Epic", legendary: "Legendary",
+  void_touched: "Void Touched", void_spiraled: "Void Spiraled",
+};
+// Same fixed rarity order roll_loot()'s rarity_weights uses in schema.sql --
+// worst to best -- so the Auto-Scrap checkboxes list in a sensible order.
+const EQ_RARITY_ORDER = ["junk", "common", "rare", "epic", "legendary", "void_touched", "void_spiraled"];
+// Mirrors schema.sql's stat_display_names in roll_loot() -- kept in sync by
+// hand (there's no RPC that hands the client this mapping), same as
+// SLOT_LABELS/RARITY_LABELS above.
+const EQ_STAT_LABELS = {
+  attack_pct: "Power", defense_pct: "Defense", hp_pct: "Vitality", attack_speed_pct: "Attack Speed",
+  crit_chance_flat: "Crit", multi_strike_flat: "Multi Strike", speed_pct: "Speed", evasion_flat: "Evasion",
+  life_steal_pct: "Life Steal", dodge_flat: "Dodge", block_flat: "Block", parry_flat: "Parry",
+  riposte_flat: "Riposte", thorns_flat: "Thorns", bristle_back_pct: "Bristle Back", bleed_pct: "Bleed",
+  abyssal_touch_flat: "Abyssal Touch", xp_gain_pct: "Increased XP", item_find_pct: "Increased Item Find",
+};
+
+function formatEquipMods(mods) {
+  const entries = Object.entries(mods || {});
+  if (!entries.length) return "No bonuses.";
+  return entries
+    .map(([key, val]) => `${EQ_STAT_LABELS[key] || key} +${val}${key.endsWith("_pct") ? "%" : ""}`)
+    .join(", ");
+}
+
+// BAG_CAP mirrors persist_loot_drops()'s bag_cap constant in schema.sql --
+// display-only here (the real enforcement, including the +10 grace, is
+// entirely server-side). Kept in sync by hand, same spirit as
+// EQ_STAT_LABELS above.
+const BAG_CAP = 250;
+
+async function loadEquipment() {
+  const { data, error } = await sb
+    .from("equipment")
+    .select("*")
+    .eq("profile_id", state.user.id)
+    .order("created_at", { ascending: false });
+  if (error) return console.error(error);
+  state.equipment = data || [];
+  renderEquipmentSlots();
+  renderInventoryPanel();
+}
+
+// Fills the 7 equip-slot boxes in index.html (eq-slot-helm/weapon/garb/
+// ring-0/ring-1/relic-0/relic-1) from state.equipment's currently-equipped
+// rows. Ring and Relic share one slot TYPE server-side (see equip_item()'s
+// comment in schema.sql) -- the split into two boxes here is purely this
+// function picking which of the (at most 2) equipped rows goes in which
+// box, arbitrary but stable within a single render.
+function renderEquipmentSlots() {
+  const equipped = state.equipment.filter((e) => e.equipped_at);
+  const bySlot = { helm: [], weapon: [], garb: [], ring: [], relic: [] };
+  equipped.forEach((e) => bySlot[e.slot]?.push(e));
+
+  fillEquipSlot("eq-slot-helm", "Helm", bySlot.helm[0]);
+  fillEquipSlot("eq-slot-weapon", "Weapon", bySlot.weapon[0]);
+  fillEquipSlot("eq-slot-garb", "Garb", bySlot.garb[0]);
+  fillEquipSlot("eq-slot-ring-0", "Ring", bySlot.ring[0]);
+  fillEquipSlot("eq-slot-ring-1", "Ring", bySlot.ring[1]);
+  fillEquipSlot("eq-slot-relic-0", "Relic", bySlot.relic[0]);
+  fillEquipSlot("eq-slot-relic-1", "Relic", bySlot.relic[1]);
+}
+
+function fillEquipSlot(elId, label, item) {
+  let el = $(elId);
+  if (!el) return;
+  // This div is a FIXED, reused DOM node (unlike gear-list rows, which are
+  // freshly created every render) -- loadEquipment() calls this on every
+  // drop/equip/unequip/scrap, and attachItemPopup() below adds fresh
+  // listeners each time. Clearing innerHTML only drops the CHILDREN, not
+  // listeners on el itself, so without this clone-and-replace they'd stack
+  // up call after call (eventually double/triple-firing unequip). Hide the
+  // popup first if it was open for the OLD node -- detachItemPopup(el)
+  // further down would otherwise compare against the new clone and miss it.
+  detachItemPopup(el);
+  const fresh = el.cloneNode(false); // shallow -- carries id/class, no old listeners
+  el.replaceWith(fresh);
+  el = fresh;
+
+  const labelSpan = document.createElement("span");
+  labelSpan.className = "equip-slot-label";
+  labelSpan.textContent = label;
+  el.appendChild(labelSpan);
+
+  if (!item) {
+    el.classList.remove("equip-slot-filled");
+    return;
+  }
+
+  el.classList.add("equip-slot-filled");
+  const nameSpan = document.createElement("span");
+  nameSpan.className = `equip-slot-item eq-rarity-${item.rarity}`;
+  nameSpan.textContent = item.name;
+  el.appendChild(nameSpan);
+  // No separate el.onclick here -- attachItemPopup's own click handler
+  // covers both "show info" and "confirm unequip" in one place (see its
+  // comment below), since a bare el.onclick alongside a click listener
+  // would fire independently and unequip on the very first tap, defeating
+  // the point of showing the popup first on mobile.
+  attachItemPopup(el, item, "Tap again to unequip.", () => unequipItem(item.id));
+}
+
+// Renders the unified Inventory panel: materials (state.inventoryRows) under
+// a Materials sub-header, then unequipped gear (state.equipment) grouped
+// into per-slot-type sub-headers in EQ_SLOT_ORDER -- a sub-header only
+// appears when that group actually has at least one entry. Called by both
+// loadInventory() and loadEquipment() (either data source refreshing should
+// redraw the whole thing), so it reads straight from state rather than
+// taking rows as a parameter.
+function renderInventoryPanel() {
   const ul = $("inventory-list");
+  if (!ul) return;
   ul.innerHTML = "";
-  if (!rows.length) {
+
+  const materials = state.inventoryRows || [];
+  const unequippedGear = (state.equipment || []).filter((e) => !e.equipped_at);
+
+  const bagCountEl = $("bag-count");
+  if (bagCountEl) bagCountEl.textContent = `Bag: ${unequippedGear.length} / ${BAG_CAP}`;
+
+  if (!materials.length && !unequippedGear.length) {
     const li = document.createElement("li");
     li.className = "log";
     li.textContent = "Empty.";
     ul.appendChild(li);
     return;
   }
-  rows.forEach((row) => {
-    const item = row.items;
-    if (!item) return;
-    const li = document.createElement("li");
-    li.title = item.description || "";
-    const name = document.createElement("span");
-    name.className = `rarity-${item.rarity}`;
-    name.textContent = item.name;
-    const qty = document.createElement("span");
-    qty.className = "item-qty";
-    qty.textContent = `x${row.quantity}`;
-    li.appendChild(name);
-    li.appendChild(qty);
-    ul.appendChild(li);
+
+  if (materials.length) {
+    ul.appendChild(makeInventorySubheader("Materials"));
+    materials.forEach((row) => {
+      const item = row.items;
+      if (!item) return;
+      const li = document.createElement("li");
+      li.title = item.description || "";
+      const name = document.createElement("span");
+      name.className = `rarity-${item.rarity}`;
+      name.textContent = item.name;
+      const qty = document.createElement("span");
+      qty.className = "item-qty";
+      qty.textContent = `x${row.quantity}`;
+      li.appendChild(name);
+      li.appendChild(qty);
+      ul.appendChild(li);
+    });
+  }
+
+  const bySlot = { helm: [], weapon: [], garb: [], ring: [], relic: [] };
+  unequippedGear.forEach((e) => bySlot[e.slot]?.push(e));
+
+  EQ_SLOT_ORDER.forEach((slot) => {
+    const items = bySlot[slot];
+    if (!items.length) return;
+    ul.appendChild(makeInventorySubheader(EQ_SLOT_LABELS[slot] || slot));
+    items.forEach((item) => {
+      const li = document.createElement("li");
+      const name = document.createElement("span");
+      name.className = `eq-rarity-${item.rarity}`;
+      name.textContent = `${item.name} (Lv ${item.level || 1})`;
+      li.appendChild(name);
+
+      const actions = document.createElement("span");
+      actions.className = "item-row-actions";
+
+      const equipBtn = document.createElement("button");
+      equipBtn.type = "button";
+      equipBtn.className = "btn-ghost btn-small";
+      equipBtn.textContent = "Equip";
+      equipBtn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        equipItem(item.id);
+      });
+      actions.appendChild(equipBtn);
+
+      const scrapBtn = document.createElement("button");
+      scrapBtn.type = "button";
+      scrapBtn.className = "btn-ghost btn-small btn-scrap";
+      scrapBtn.textContent = "Scrap";
+      scrapBtn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        scrapItem(item.id);
+      });
+      actions.appendChild(scrapBtn);
+
+      li.appendChild(actions);
+      attachItemPopup(li, item);
+      ul.appendChild(li);
+    });
   });
+}
+
+function makeInventorySubheader(text) {
+  const li = document.createElement("li");
+  li.className = "inventory-subheader";
+  li.textContent = text;
+  return li;
+}
+
+async function equipItem(id) {
+  const { error } = await sb.rpc("equip_item", { p_equipment_id: id });
+  if (error) {
+    // most likely "that slot is already full" (see equip_item in
+    // schema.sql) -- surfaced directly rather than silently no-op'ing, so
+    // the player knows to unequip something in that slot first.
+    alert(error.message);
+    return;
+  }
+  await loadEquipment();
+}
+
+async function unequipItem(id) {
+  const { error } = await sb.rpc("unequip_item", { p_equipment_id: id });
+  if (error) return console.error(error);
+  await loadEquipment();
+}
+
+// Manual, single-item scrap (see scrap_equipment() in schema.sql) -- destroy
+// one unequipped piece of gear for its rarity's flat gold value. A simple
+// confirm() guards it since this is instant and irreversible, same spirit
+// as any other destructive action in the game.
+async function scrapItem(id) {
+  const item = state.equipment.find((e) => e.id === id);
+  if (item && !confirm(`Scrap ${item.name}? This can't be undone.`)) return;
+  hideItemPopup();
+  const { data, error } = await sb.rpc("scrap_equipment", { p_equipment_id: id });
+  if (error) {
+    alert(error.message);
+    return;
+  }
+  const row = data?.[0];
+  if (row) $("tick-log").textContent = `Scrapped for ${row.gold_gained} gold.`;
+  await Promise.all([loadEquipment(), loadProfile()]);
+}
+
+// ---------------------------------------------------------------------------
+// Auto-Scrap settings + Clean Bag (see set_auto_scrap_rarities()/
+// cleanup_bag() in schema.sql) -- a per-rarity "always convert this to gold
+// the instant it drops" list, plus a button to sweep that same list against
+// whatever's already sitting in the bag right now.
+// ---------------------------------------------------------------------------
+
+function renderAutoScrapSettings() {
+  const container = $("auto-scrap-checks");
+  if (!container) return;
+  const current = new Set(state.profile?.auto_scrap_rarities || []);
+  container.innerHTML = "";
+  EQ_RARITY_ORDER.forEach((rarity) => {
+    const label = document.createElement("label");
+    label.className = "auto-scrap-check";
+    const checkbox = document.createElement("input");
+    checkbox.type = "checkbox";
+    checkbox.checked = current.has(rarity);
+    checkbox.addEventListener("change", () => toggleAutoScrapRarity(rarity, checkbox.checked));
+    label.appendChild(checkbox);
+    const span = document.createElement("span");
+    span.className = `eq-rarity-${rarity}`;
+    span.textContent = EQ_RARITY_LABELS[rarity] || rarity;
+    label.appendChild(span);
+    container.appendChild(label);
+  });
+}
+
+async function toggleAutoScrapRarity(rarity, checked) {
+  const current = new Set(state.profile?.auto_scrap_rarities || []);
+  if (checked) current.add(rarity);
+  else current.delete(rarity);
+  const { data, error } = await sb.rpc("set_auto_scrap_rarities", { p_rarities: Array.from(current) });
+  if (error) {
+    alert(error.message);
+    renderAutoScrapSettings(); // revert the checkbox to match what's actually saved
+    return;
+  }
+  state.profile = data?.[0] || state.profile;
+}
+
+$("btn-clean-bag")?.addEventListener("click", async () => {
+  const { data, error } = await sb.rpc("cleanup_bag");
+  if (error) return alert(error.message);
+  const row = data?.[0];
+  if (row) {
+    $("tick-log").textContent = row.items_scrapped > 0
+      ? `Cleaned ${row.items_scrapped} item${row.items_scrapped === 1 ? "" : "s"} for ${row.gold_gained} gold.`
+      : "Nothing to clean -- turn on an Auto-Scrap rarity above first.";
+  }
+  await Promise.all([loadEquipment(), loadProfile()]);
+});
+
+// ---------------------------------------------------------------------------
+// Item stat popup: one shared #item-popup element (see index.html), reused
+// for every equip-slot box and every gear list row rather than one per
+// item. Hover opens it on desktop (mouseenter/mouseleave); a click/tap
+// toggles it open on mobile, where hover doesn't really exist -- a second
+// tap anywhere else on the page closes it (see the document click listener
+// below). Positioned near whichever element triggered it, flipped to stay
+// on-screen when it would otherwise overflow the viewport.
+// ---------------------------------------------------------------------------
+
+let popupOpenFor = null; // the element the popup is currently showing for, or null
+
+function buildItemPopupContent(item, footerText) {
+  const frag = document.createDocumentFragment();
+
+  const title = document.createElement("div");
+  title.className = `item-popup-title eq-rarity-${item.rarity}`;
+  title.textContent = item.name;
+  frag.appendChild(title);
+
+  const meta = document.createElement("div");
+  meta.className = "item-popup-meta";
+  meta.textContent = `${EQ_RARITY_LABELS[item.rarity] || item.rarity} ${EQ_SLOT_LABELS[item.slot] || item.slot} -- Lv ${item.level || 1}`;
+  frag.appendChild(meta);
+
+  const entries = Object.entries(item.mods || {});
+  const statsList = document.createElement("ul");
+  statsList.className = "item-popup-stats";
+  if (!entries.length) {
+    const li = document.createElement("li");
+    li.textContent = "No bonuses.";
+    statsList.appendChild(li);
+  } else {
+    entries.forEach(([key, val]) => {
+      const li = document.createElement("li");
+      li.textContent = `${EQ_STAT_LABELS[key] || key} +${val}${key.endsWith("_pct") ? "%" : ""}`;
+      statsList.appendChild(li);
+    });
+  }
+  frag.appendChild(statsList);
+
+  if (footerText) {
+    const footer = document.createElement("div");
+    footer.className = "item-popup-footer";
+    footer.textContent = footerText;
+    frag.appendChild(footer);
+  }
+
+  return frag;
+}
+
+function showItemPopup(anchorEl, item, footerText) {
+  const popup = $("item-popup");
+  if (!popup) return;
+  popup.innerHTML = "";
+  popup.appendChild(buildItemPopupContent(item, footerText));
+  popup.classList.remove("hidden");
+  popupOpenFor = anchorEl;
+
+  const rect = anchorEl.getBoundingClientRect();
+  // Measure after making it visible-but-unpositioned so offsetWidth/Height
+  // are accurate, then flip above/left as needed to stay on-screen.
+  const popupRect = popup.getBoundingClientRect();
+  let top = rect.bottom + 8;
+  if (top + popupRect.height > window.innerHeight) {
+    top = Math.max(8, rect.top - popupRect.height - 8);
+  }
+  let left = rect.left;
+  if (left + popupRect.width > window.innerWidth - 8) {
+    left = Math.max(8, window.innerWidth - popupRect.width - 8);
+  }
+  popup.style.top = `${top}px`;
+  popup.style.left = `${left}px`;
+}
+
+function hideItemPopup() {
+  const popup = $("item-popup");
+  if (!popup) return;
+  popup.classList.add("hidden");
+  popupOpenFor = null;
+}
+
+// Wires both hover (desktop) and click/tap (mobile, and desktop too --
+// clicking a row is a perfectly normal way to inspect it) to the same
+// shared popup. footerText is an optional extra line (e.g. "Tap again to
+// unequip.") shown under the stat list. onActivate is optional -- when
+// given (equip-slot boxes pass unequipItem), a click/tap while the popup is
+// ALREADY open for this element performs that action instead of just
+// re-showing the popup; a click/tap while it's NOT yet open always just
+// shows it first. That gives desktop its original one-click-to-unequip feel
+// (hovering already opens the popup before you click) while mobile, which
+// has no hover, gets a safe tap-to-preview/tap-again-to-confirm instead of
+// an instant destructive action on the very first touch. Gear list rows
+// (no onActivate -- their Equip/Scrap buttons handle actions themselves,
+// already stopPropagation'd against this same listener) just toggle the
+// popup open on every tap, which is exactly "show me the stats."
+function attachItemPopup(el, item, footerText, onActivate) {
+  el.addEventListener("mouseenter", () => showItemPopup(el, item, footerText));
+  el.addEventListener("mouseleave", () => {
+    if (popupOpenFor === el) hideItemPopup();
+  });
+  el.addEventListener("click", () => {
+    if (popupOpenFor === el && onActivate) {
+      hideItemPopup();
+      onActivate();
+      return;
+    }
+    showItemPopup(el, item, footerText);
+  });
+}
+
+function detachItemPopup(el) {
+  if (popupOpenFor === el) hideItemPopup();
+}
+
+document.addEventListener("click", (e) => {
+  const popup = $("item-popup");
+  if (!popup || popup.classList.contains("hidden")) return;
+  if (popup.contains(e.target)) return;
+  if (popupOpenFor && popupOpenFor.contains(e.target)) return;
+  hideItemPopup();
+});
+
+// Short "Found X!" / "Found N items!" clause for the tick-log message --
+// see autoStrikeEnemy()/doTick() below for where row.loot_drops (an array
+// of {id, slot, rarity, name, mods}, see combat_action_result.loot_drops
+// in schema.sql) actually comes from.
+function describeLootDrops(drops) {
+  if (!Array.isArray(drops) || !drops.length) return "";
+  if (drops.length === 1) return ` Found ${drops[0].name}!`;
+  return ` Found ${drops.length} items!`;
 }
 
 // Below this, an "away" gap is worth interrupting login with a summary for
@@ -1068,6 +1507,8 @@ function maybeShowWelcomeBackSummary(idleRow) {
   const gold = Number(idleRow.gold_gained) || 0;
   const kills = Number(idleRow.combat_kills) || 0;
   const deaths = Number(idleRow.combat_deaths) || 0;
+  const items = Array.isArray(idleRow.loot_drops) ? idleRow.loot_drops.length : 0;
+  const scrapped = Number(idleRow.items_scrapped) || 0;
   if (xp <= 0 && gold <= 0) return; // nothing actually earned (e.g. a brand-new character's first load)
 
   let awayText = `You were away for ${formatDuration(idleRow.elapsed_seconds)}.`;
@@ -1086,6 +1527,22 @@ function maybeShowWelcomeBackSummary(idleRow) {
     killsRow?.classList.add("hidden");
   }
 
+  const itemsRow = $("welcome-back-items-row");
+  if (items > 0) {
+    $("welcome-back-items").textContent = items.toLocaleString();
+    itemsRow?.classList.remove("hidden");
+  } else {
+    itemsRow?.classList.add("hidden");
+  }
+
+  const scrappedRow = $("welcome-back-scrapped-row");
+  if (scrapped > 0) {
+    $("welcome-back-scrapped").textContent = `${scrapped.toLocaleString()} (+${(Number(idleRow.scrap_gold_gained) || 0).toLocaleString()} gold)`;
+    scrappedRow?.classList.remove("hidden");
+  } else {
+    scrappedRow?.classList.add("hidden");
+  }
+
   $("welcome-back-overlay")?.classList.remove("hidden");
 }
 
@@ -1095,6 +1552,15 @@ async function doTick(opts = {}) {
   const idleRow = data?.[0];
 
   if (opts.isInitial) maybeShowWelcomeBackSummary(idleRow);
+
+  // Offline combat (see perform_idle_tick in schema.sql) can roll drops of
+  // its own during a long catch-up, same as a live strike_enemy() call --
+  // refresh Gear/Equipment so they're not stuck waiting for a page reload.
+  // Almost always empty on the frequent periodic ticks (elapsed time is
+  // normally under one action's worth), but cheap to check regardless.
+  if (Array.isArray(idleRow?.loot_drops) && idleRow.loot_drops.length > 0) {
+    await loadEquipment();
+  }
 
   // one auto-strike against the current pack per tick — costs 1 action,
   // stops gracefully once the pool is empty (see autoStrikeEnemy above)
@@ -1215,6 +1681,7 @@ $("btn-perform-banish").addEventListener("click", async () => {
   $("banish-overlay").classList.add("hidden");
   await loadProfile();
   await loadInventory();
+  await loadEquipment(); // perform_banishment() wipes equipment along with inventory -- see its comment in schema.sql
   await loadPack();
 });
 

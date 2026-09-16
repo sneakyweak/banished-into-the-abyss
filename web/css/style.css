@@ -557,6 +557,33 @@ button:disabled { opacity: 0.4; cursor: not-allowed; }
   transform: translateY(0);
 }
 
+/* Item stat popup (Equipment slots + Inventory gear rows) -- unlike
+   [data-tooltip] above, this is a single shared element positioned by JS
+   (see showItemPopup()/attachItemPopup() in app.js), since its content is
+   rich (name, rarity, level, a full stat list) rather than one short plain
+   string, and it needs to work on tap for mobile, not just :hover. Visually
+   styled to match [data-tooltip]'s dark popup look. */
+.item-popup {
+  position: fixed;
+  z-index: 60;
+  min-width: 160px;
+  max-width: 240px;
+  background: #17111f;
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 10px 12px;
+  font-size: 0.78rem;
+  line-height: 1.4;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.5);
+  pointer-events: none; /* purely informational -- never blocks the tap that opened/closes it */
+}
+.item-popup.hidden { display: none; }
+.item-popup-title { font-weight: bold; font-size: 0.85rem; margin-bottom: 2px; }
+.item-popup-meta { color: var(--dim); font-size: 0.7rem; margin-bottom: 6px; }
+.item-popup-stats { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
+.item-popup-footer { margin-top: 6px; padding-top: 6px; border-top: 1px dotted var(--border); color: var(--dim); font-size: 0.7rem; }
+
 /* Battle panel */
 
 /* Player summary stays a centered block on top; the enemy pack renders
@@ -756,7 +783,7 @@ button:disabled { opacity: 0.4; cursor: not-allowed; }
   padding: 8px; border-radius: 4px; font-family: inherit;
 }
 
-/* Equipment (placeholder — not wired to any backend yet) */
+/* Equipment */
 
 .equip-grid {
   display: grid;
@@ -768,8 +795,11 @@ button:disabled { opacity: 0.4; cursor: not-allowed; }
   border: 1px dashed var(--border);
   border-radius: 6px;
   display: flex;
+  flex-direction: column;
   align-items: center;
   justify-content: center;
+  text-align: center;
+  padding: 4px;
   opacity: 0.55;
 }
 .equip-slot-label { font-size: 0.75rem; letter-spacing: 0.5px; color: var(--dim); }
@@ -779,6 +809,66 @@ button:disabled { opacity: 0.4; cursor: not-allowed; }
    half the row width minus half the gap) so it doesn't look oversized
    sitting by itself. */
 .equip-slot-centered { width: calc(50% - 5px); margin: 0 auto 10px; }
+
+/* A slot holding actual gear (see renderEquipmentSlots() in app.js): solid
+   border instead of dashed, full opacity, and clickable to unequip --
+   still no game art (see DESIGN.md's premise), the rarity color on the
+   item name below the slot label IS the visual. */
+.equip-slot-filled {
+  border-style: solid;
+  border-color: var(--accent);
+  opacity: 1;
+  cursor: pointer;
+}
+.equip-slot-filled:hover { border-color: var(--accent-bright); box-shadow: 0 0 0 1px var(--accent-bright); }
+.equip-slot-item { font-size: 0.7rem; line-height: 1.2; margin-top: 2px; word-break: break-word; }
+
+/* Gear (unequipped drops -- see the Equipment panel above for what's
+   currently worn) now renders inside .inventory-list itself (see
+   renderInventoryPanel() in app.js), grouped under per-slot-type
+   sub-headers rather than a separate panel -- .inventory-subheader/
+   .item-row-actions below are what that adds on top of .inventory-list's
+   existing row layout. */
+.inventory-list li { align-items: center; gap: 8px; }
+.item-row-actions { display: flex; gap: 6px; flex-shrink: 0; }
+.item-row-actions .btn-small { flex-shrink: 0; }
+.btn-scrap { border-color: var(--danger); color: var(--danger); }
+.btn-scrap:hover { border-color: var(--danger); color: #fff; background: var(--danger); opacity: 1; }
+
+/* Sub-headers inside the unified Inventory list (Materials, then Helm/
+   Weapon/Garb/Ring/Relic -- see EQ_SLOT_ORDER in app.js). Not a real <li>
+   row (no border-bottom, no space-between), just a small label to break
+   the list into scannable groups. */
+.inventory-subheader {
+  border-bottom: none !important;
+  color: var(--dim);
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  padding-top: 6px;
+  padding-bottom: 2px !important;
+}
+.inventory-subheader:first-child { padding-top: 0; }
+
+.inventory-panel-header { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+.bag-count { font-size: 0.75rem; color: var(--dim); }
+
+/* Auto-Scrap settings + Clean Bag -- a small strip between the Inventory
+   panel's title and the item list itself (see set_auto_scrap_rarities()/
+   cleanup_bag() in schema.sql). */
+.auto-scrap-settings {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+  margin: 6px 0 12px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--border);
+}
+.auto-scrap-settings .log { flex-basis: 100%; margin: 0; }
+.auto-scrap-checks { display: flex; flex-wrap: wrap; gap: 4px 10px; flex: 1 1 auto; }
+.auto-scrap-check { display: flex; align-items: center; gap: 4px; font-size: 0.75rem; cursor: pointer; }
+.auto-scrap-check input { margin: 0; cursor: pointer; }
 
 /* Additional Affixes now reuses .stat-list's row layout (see Combat Stats
    above) instead of the equipment panel's dashed slot boxes -- these read
@@ -799,3 +889,36 @@ button:disabled { opacity: 0.4; cursor: not-allowed; }
 .inventory-list .rarity-rare { color: #5b9dff; }
 .inventory-list .rarity-epic { color: #c084fc; }
 .inventory-list .rarity-legendary { color: #f0c674; }
+
+.btn-small { font-size: 0.7rem; padding: 3px 8px; border-radius: 4px; }
+
+/* Gear rarity palette (equipment table, see roll_loot() in schema.sql) --
+   deliberately a SEPARATE scale from .rarity-* above, which is the
+   materials/trinkets catalog's own five-tier scheme (common/uncommon/rare/
+   epic/legendary) -- gear has seven tiers, the bottom and top two of which
+   don't exist in that older scheme at all. White/green/blue/purple/orange
+   for the five normal tiers (as the player specified), then two chase
+   tiers above Legendary: Void Touched gets a cool cyan glow, Void Spiraled
+   -- the 0.1% chase item, rarer than Legendary by 24x -- gets an animated
+   shimmering gradient so it's unmistakable at a glance next to everything
+   else, still pure CSS/text, no image assets (see DESIGN.md's premise). */
+.eq-rarity-junk { color: #a8a2b5; }
+.eq-rarity-common { color: #4caf6d; }
+.eq-rarity-rare { color: #5b9dff; }
+.eq-rarity-epic { color: #c084fc; }
+.eq-rarity-legendary { color: #ff9d3d; }
+.eq-rarity-void_touched { color: #2de6c8; text-shadow: 0 0 6px rgba(45, 230, 200, 0.6); }
+.eq-rarity-void_spiraled {
+  background: linear-gradient(90deg, #ff3b8d, #8b5cf6, #2de6c8, #ff3b8d);
+  background-size: 300% 100%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  text-shadow: 0 0 10px rgba(139, 92, 246, 0.5);
+  animation: void-spiral-shimmer 3s linear infinite;
+  font-weight: bold;
+}
+@keyframes void-spiral-shimmer {
+  0% { background-position: 0% 50%; }
+  100% { background-position: 300% 50%; }
+}

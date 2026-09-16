@@ -149,6 +149,14 @@ alter table profiles add column if not exists sel_pack_size int not null default
 alter table profiles add column if not exists sel_affix_count int not null default 0 check (sel_affix_count between 0 and 5);
 alter table profiles add column if not exists sel_debuff_count int not null default 0 check (sel_debuff_count between 0 and 4);
 
+-- auto_scrap_rarities: the player's own standing "always scrap this rarity
+-- the instant it drops" list (see set_auto_scrap_rarities() and
+-- resolve_combat_action()'s loot-roll branch, both further down). Empty by
+-- default -- auto-scrap is opt-in, never silently discarding a first-time
+-- player's early Junk drops without them choosing to. Validated against the
+-- same rarity set equipment.rarity's own check constraint uses.
+alter table profiles add column if not exists auto_scrap_rarities text[] not null default '{}'::text[];
+
 -- Removed: sel_banishment_bracket, the old "which bracket am I choosing to
 -- fight at" dial, separate from and pushable above the player's own actual
 -- Banishment count. There's only one Banishments number in the game now --
@@ -294,6 +302,12 @@ create table if not exists equipment (
 );
 create index if not exists idx_equipment_profile on equipment(profile_id);
 create index if not exists idx_equipment_equipped on equipment(profile_id, slot) where equipped_at is not null;
+-- level: the character's level AT DROP TIME -- purely informational (shown
+-- on the item's tooltip client-side, see EQ_STAT_LABELS/renderItemPopup in
+-- app.js), never a power lever itself since combat only ever reads mods.
+-- Backfilled to 1 for any pre-existing rows (there's no way to know their
+-- true drop-time level after the fact).
+alter table equipment add column if not exists level int not null default 1;
 
 -- solo enemies: the mob catalog for the single ongoing "Current Battle"
 -- (separate from guild_bosses, which are per-guild and idle-fed). A player
@@ -1539,6 +1553,32 @@ create type loot_drop as (
   mods   jsonb
 );
 
+-- scrap_value: flat gold conversion per rarity when a piece of gear is
+-- destroyed for gold -- whether that's the player manually scrapping one
+-- item (scrap_equipment()), their own standing auto-scrap-on-drop settings
+-- (resolve_combat_action()'s loot-roll branch below, via
+-- set_auto_scrap_rarities()), a bulk sweep (cleanup_bag()), or the
+-- equipment-cap overflow (persist_loot_drops()) -- every path funnels
+-- through this one place so the payout is always consistent. TUNE -- a
+-- first-pass schedule, roughly doubling-or-better per tier, same shape as
+-- the rarity odds themselves (see roll_loot()'s rarity_weights).
+create or replace function scrap_value(p_rarity text)
+returns int
+language sql
+immutable
+as $$
+  select case p_rarity
+    when 'junk' then 1
+    when 'common' then 3
+    when 'rare' then 8
+    when 'epic' then 20
+    when 'legendary' then 60
+    when 'void_touched' then 150
+    when 'void_spiraled' then 400
+    else 0
+  end;
+$$;
+
 -- Shared combat core, extracted from what used to be strike_enemy()'s whole
 -- body so the exact same one-action-worth-of-fighting logic can run from two
 -- places: strike_enemy() itself (one call, while the player is online and
@@ -1568,13 +1608,26 @@ create type combat_action_result as (
   gold_lost int,
   round_log jsonb,
   -- one entry per item rolled this call (see the drop hook below), each
-  -- {"slot":..,"rarity":..,"name":..,"mods":..} -- shaped to insert
-  -- straight into the equipment table, which is exactly what the two
-  -- callers (strike_enemy()/perform_idle_tick()) do with it. Always an
-  -- array, usually empty -- resolve_combat_action() itself never touches
-  -- the database (see its own "pure" contract above), so it can only hand
-  -- drops back for the caller to persist, not write them itself.
-  loot_drops jsonb
+  -- {"slot":..,"rarity":..,"name":..,"mods":..,"level":..} -- shaped to
+  -- insert straight into the equipment table, which is exactly what the two
+  -- callers (strike_enemy()/perform_idle_tick()) do with it, via
+  -- persist_loot_drops() further down. Always an array, usually empty --
+  -- resolve_combat_action() itself never touches the database (see its own
+  -- "pure" contract above), so it can only hand drops back for the caller
+  -- to persist, not write them itself. Anything the player's own
+  -- auto_scrap_rarities settings (see set_auto_scrap_rarities() below)
+  -- already caught is NOT in here -- it was converted straight to gold
+  -- instead and is already folded into gold_gained, with its own count/
+  -- total broken out below for messaging.
+  loot_drops jsonb,
+  -- Auto-scrap-on-drop (by the player's own rarity settings, checked right
+  -- where a drop would otherwise be rolled into loot_drops above) --
+  -- separate from the EQUIPMENT-CAP overflow scrapping persist_loot_drops()
+  -- does, which this function knows nothing about (it can't -- it never
+  -- reads the equipment table to see how full the bag already is). Both
+  -- funnel through the same scrap_value() pricing either way.
+  items_scrapped int,
+  scrap_gold_gained int
 );
 
 -- p is the player's profiles row (read-only here -- its gold/xp/hp columns
@@ -1671,6 +1724,15 @@ declare
   drop_chance numeric := 0.15;
   total_loot jsonb := '[]'::jsonb;
   loot_row loot_drop;
+  -- Auto-scrap-on-drop: p.auto_scrap_rarities (see set_auto_scrap_rarities()
+  -- below) is the player's own standing "never even show me this rarity"
+  -- list -- checked the instant a drop rolls, right below, and if it
+  -- matches, the item never touches loot_drops/equipment at all; it's
+  -- converted straight to gold instead. Both totals returned separately
+  -- (see combat_action_result.items_scrapped/scrap_gold_gained above) so
+  -- callers can surface "auto-scrapped N items for G gold" to the player.
+  total_items_scrapped int := 0;
+  total_scrap_gold int := 0;
 begin
   new_affix_keys := p_affix_keys;
   new_debuff_keys := p_debuff_keys;
@@ -1810,13 +1872,14 @@ begin
       round_hits := round_hits || jsonb_build_array(jsonb_build_object(
         'source', 'player', 'target', target_idx, 'dmg', hit.dmg, 'crit', hit.was_crit, 'multi_strike', false
       ));
-      -- Kill heal: 25% of this fight's effective max HP, per pack member
-      -- killed (target_idx was only ever selected from hp>0 members above,
-      -- so pre-swing hp is always >0 here -- a kill is exactly this swing's
-      -- damage taking it to <=0). Rewards actually landing kills with a bit
-      -- of breathing room, short of the full heal a death gives.
+      -- Kill heal: a FULL heal (to this fight's effective max HP), per pack
+      -- member killed (target_idx was only ever selected from hp>0 members
+      -- above, so pre-swing hp is always >0 here -- a kill is exactly this
+      -- swing's damage taking it to <=0). Was a 25%-of-max partial heal;
+      -- bumped to a full heal per request -- every landed kill now tops the
+      -- player right back off, same as a death's respawn heal already did.
       if (member->>'hp')::int - hit.dmg <= 0 then
-        cur_player_hp := least(cur_player_max_hp, cur_player_hp + round(cur_player_max_hp * 0.25)::int);
+        cur_player_hp := cur_player_max_hp;
       end if;
 
       -- Multi Strike: a bonus swing that CASCADES to the next still-alive
@@ -1839,7 +1902,7 @@ begin
           -- same kill heal as the primary swing above -- multi strike can
           -- land its own separate kill this round.
           if (member->>'hp')::int - hit.dmg <= 0 then
-            cur_player_hp := least(cur_player_max_hp, cur_player_hp + round(cur_player_max_hp * 0.25)::int);
+            cur_player_hp := cur_player_max_hp;
           end if;
         end if;
       end if;
@@ -1860,9 +1923,10 @@ begin
       pack_gold := round(pack_gold * reward_mult);
 
       -- No separate heal here anymore -- the kill that just cleared this
-      -- pack already triggered its own 25% kill heal above (every kill
+      -- pack already triggered its own full kill heal above (every kill
       -- does now, not just the one that empties the pack), so cur_player_hp
-      -- already reflects it by the time we log the round below.
+      -- already reflects it (== cur_player_max_hp) by the time we log the
+      -- round below.
 
       if p_build_log then
         round_log := round_log || jsonb_build_array(jsonb_build_object(
@@ -1882,10 +1946,22 @@ begin
       -- drop_chance's stored value, so it never permanently drifts.
       if random() < drop_chance * (1 + mod_val(player_mods, 'item_find_pct') / 100.0) then
         loot_row := roll_loot();
-        total_loot := total_loot || jsonb_build_array(jsonb_build_object(
-          'slot', loot_row.slot, 'rarity', loot_row.rarity,
-          'name', loot_row.name, 'mods', loot_row.mods
-        ));
+        -- Auto-scrap-on-drop (see total_items_scrapped/total_scrap_gold's
+        -- declaration above): if the player has this rarity on their
+        -- standing scrap list, skip loot_drops entirely and just grant its
+        -- gold value -- never even a momentary bag entry to clean up later.
+        if loot_row.rarity = any(p.auto_scrap_rarities) then
+          total_items_scrapped := total_items_scrapped + 1;
+          total_scrap_gold := total_scrap_gold + scrap_value(loot_row.rarity);
+        else
+          -- level: the character's level AT DROP TIME, purely informational
+          -- (shown on the item's tooltip client-side) -- never itself a
+          -- power lever, since combat only ever reads an item's mods.
+          total_loot := total_loot || jsonb_build_array(jsonb_build_object(
+            'slot', loot_row.slot, 'rarity', loot_row.rarity,
+            'name', loot_row.name, 'mods', loot_row.mods, 'level', p.level
+          ));
+        end if;
       end if;
 
       -- roll the next pack now so it's ready and waiting, but STOP here —
@@ -1980,12 +2056,102 @@ begin
   res.kills := total_kills;
   res.deaths := total_deaths;
   res.xp_gained := total_xp;
-  res.gold_gained := total_gold;
+  -- total_scrap_gold folds straight into gold_gained here -- auto-scrapped
+  -- gold is just gold, same as a pack's own gold_reward. items_scrapped/
+  -- scrap_gold_gained below are a breakdown for messaging only; callers
+  -- must NOT also add scrap_gold_gained on top of gold_gained themselves.
+  res.gold_gained := total_gold + total_scrap_gold;
   res.xp_lost := total_xp_lost;
   res.gold_lost := total_gold_lost;
   res.round_log := round_log;
   res.loot_drops := total_loot;
+  res.items_scrapped := total_items_scrapped;
+  res.scrap_gold_gained := total_scrap_gold;
   return res;
+end;
+$$;
+
+-- Persists a batch of rolled loot (res.loot_drops, as produced by
+-- resolve_combat_action() above) into the equipment table, enforcing the
+-- unequipped-gear bag cap. 250 is the number shown to players ("Bag:
+-- X/250"), but an extra +10 GRACE is allowed past that before anything
+-- actually gets turned away -- so a player is never cut off exactly at the
+-- advertised number with zero warning, they just see the bag read over-full
+-- for a little while. Once the hard cap (260) is actually hit, anything
+-- past it is auto-scrapped (via scrap_value() -- see its own comment)
+-- rather than silently discarded -- a kill's reward should never just
+-- vanish for nothing, even when the bag has no room left. This is a
+-- SEPARATE mechanism from the player's own auto_scrap_rarities settings
+-- (checked earlier, inside resolve_combat_action() itself, before an item
+-- ever reaches loot_drops/this function at all) -- this one only ever
+-- fires when the bag is genuinely full, regardless of rarity settings.
+-- Shared by strike_enemy() and perform_idle_tick() so the cap enforces
+-- identically for online and offline-catchup drops. p_profile_id is
+-- trusted as given (both callers already hold an auth.uid()-checked
+-- profiles row) -- this is never exposed as a client-callable RPC on its
+-- own, so it does no ownership check of its own.
+create or replace function persist_loot_drops(p_profile_id uuid, p_loot jsonb)
+returns table(dropped_items jsonb, overflow_scrapped int, overflow_scrap_gold int)
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  bag_cap constant int := 250;   -- TUNE: the number shown to players
+  bag_cap_grace constant int := 10; -- TUNE: extra room before overflow scrapping kicks in
+  cur_unequipped_count int;
+  cap_room int;
+  n int;
+  loot_to_insert jsonb;
+  loot_to_scrap jsonb;
+  scrap_gold int := 0;
+  scrap_count int := 0;
+  inserted jsonb := '[]'::jsonb;
+begin
+  n := coalesce(jsonb_array_length(p_loot), 0);
+  if n = 0 then
+    return query select '[]'::jsonb, 0, 0;
+    return;
+  end if;
+
+  select count(*) into cur_unequipped_count from equipment
+    where profile_id = p_profile_id and equipped_at is null;
+  cap_room := greatest(0, (bag_cap + bag_cap_grace) - cur_unequipped_count);
+
+  if n > cap_room then
+    select coalesce(jsonb_agg(elem.value), '[]'::jsonb) into loot_to_insert
+      from jsonb_array_elements(p_loot) with ordinality as elem(value, idx)
+      where elem.idx <= cap_room;
+    select coalesce(jsonb_agg(elem.value), '[]'::jsonb) into loot_to_scrap
+      from jsonb_array_elements(p_loot) with ordinality as elem(value, idx)
+      where elem.idx > cap_room;
+  else
+    loot_to_insert := p_loot;
+    loot_to_scrap := '[]'::jsonb;
+  end if;
+
+  if jsonb_array_length(loot_to_scrap) > 0 then
+    select count(*), coalesce(sum(scrap_value(elem->>'rarity')), 0)
+      into scrap_count, scrap_gold
+      from jsonb_array_elements(loot_to_scrap) elem;
+    update profiles set gold = gold + scrap_gold where id = p_profile_id;
+  end if;
+
+  if jsonb_array_length(loot_to_insert) > 0 then
+    with ins as (
+      insert into equipment (profile_id, slot, rarity, name, mods, level)
+      select p_profile_id, elem->>'slot', elem->>'rarity', elem->>'name',
+             coalesce(elem->'mods', '{}'::jsonb), coalesce((elem->>'level')::int, 1)
+      from jsonb_array_elements(loot_to_insert) elem
+      returning id, slot, rarity, name, mods, level
+    )
+    select coalesce(jsonb_agg(jsonb_build_object(
+      'id', ins.id, 'slot', ins.slot, 'rarity', ins.rarity, 'name', ins.name,
+      'mods', ins.mods, 'level', ins.level
+    )), '[]'::jsonb) into inserted from ins;
+  end if;
+
+  return query select inserted, scrap_count, scrap_gold;
 end;
 $$;
 
@@ -2015,7 +2181,9 @@ returns table (
   combat_kills int,      -- this catch-up's own simulated kills/deaths/spend
   combat_deaths int,     -- -- NOT the daily_* whole-day aggregates above,
   actions_spent int,      -- just what this one call simulated
-  loot_drops jsonb        -- everything the offline combat loop rolled, see combat_action_result.loot_drops -- can be several items after a long catch-up, not just one
+  loot_drops jsonb,       -- everything the offline combat loop rolled, see combat_action_result.loot_drops -- can be several items after a long catch-up, not just one
+  items_scrapped int,     -- auto-scrapped this call, either by the player's
+  scrap_gold_gained int   -- own rarity settings or the bag hitting its cap -- see persist_loot_drops()/resolve_combat_action()
 )
 language plpgsql
 security definer
@@ -2110,6 +2278,10 @@ declare
   combat_gold_lost int := 0;
   combat_loot jsonb := '[]'::jsonb;
   dropped_items jsonb := '[]'::jsonb;
+  combat_items_scrapped int := 0;
+  combat_scrap_gold int := 0;
+  overflow_scrapped int := 0;
+  overflow_scrap_gold int := 0;
   gear_mods jsonb;
   i int;
 begin
@@ -2124,7 +2296,7 @@ begin
     return query select 0::bigint, 0::bigint, p.level, 0::bigint,
       daily.daily_dmg_dealt, daily.daily_dmg_taken, daily.daily_kills, daily.daily_deaths,
       daily.daily_idle_xp, daily.daily_idle_gold, daily.daily_reset_at,
-      greatest(0, elapsed_seconds), 0, 0, 0, '[]'::jsonb;
+      greatest(0, elapsed_seconds), 0, 0, 0, '[]'::jsonb, 0, 0;
     return;
   end if;
 
@@ -2187,6 +2359,8 @@ begin
       combat_xp_lost := combat_xp_lost + res.xp_lost;
       combat_gold_lost := combat_gold_lost + res.gold_lost;
       combat_loot := combat_loot || res.loot_drops;
+      combat_items_scrapped := combat_items_scrapped + coalesce(res.items_scrapped, 0);
+      combat_scrap_gold := combat_scrap_gold + coalesce(res.scrap_gold_gained, 0);
 
       sim_p.gold := greatest(0, sim_p.gold + res.gold_gained - res.gold_lost);
       sim_p.xp := greatest(0, sim_p.xp + res.xp_gained - res.xp_lost);
@@ -2234,21 +2408,17 @@ begin
     where id = p.id;
 
   -- Persist whatever the offline combat loop rolled across all n_actions
-  -- iterations, one batch insert rather than one per iteration -- same
+  -- iterations, one batch call rather than one per iteration -- same
   -- "accumulate in memory, write once" discipline as everything else in
-  -- this loop. See strike_enemy()'s matching insert for why RETURNING
-  -- straight into dropped_items rather than just re-using combat_loot.
+  -- this loop. persist_loot_drops() (see its own comment above) also
+  -- enforces the bag cap and auto-scraps any overflow -- a long catch-up
+  -- can very plausibly roll more items than there's room for.
   if jsonb_array_length(combat_loot) > 0 then
-    with ins as (
-      insert into equipment (profile_id, slot, rarity, name, mods)
-      select p.id, d->>'slot', d->>'rarity', d->>'name', d->'mods'
-      from jsonb_array_elements(combat_loot) d
-      returning id, slot, rarity, name, mods
-    )
-    select coalesce(jsonb_agg(jsonb_build_object(
-      'id', ins.id, 'slot', ins.slot, 'rarity', ins.rarity, 'name', ins.name, 'mods', ins.mods
-    )), '[]'::jsonb) into dropped_items
-    from ins;
+    select p2.dropped_items, p2.overflow_scrapped, p2.overflow_scrap_gold
+      into dropped_items, overflow_scrapped, overflow_scrap_gold
+      from persist_loot_drops(p.id, combat_loot) p2;
+    combat_items_scrapped := combat_items_scrapped + overflow_scrapped;
+    combat_scrap_gold := combat_scrap_gold + overflow_scrap_gold;
   end if;
 
   select * into daily from bump_daily_stats(
@@ -2278,7 +2448,8 @@ begin
   return query select gained_xp + combat_xp, gained_gold + combat_gold, lvl, dmg,
     daily.daily_dmg_dealt, daily.daily_dmg_taken, daily.daily_kills, daily.daily_deaths,
     daily.daily_idle_xp, daily.daily_idle_gold, daily.daily_reset_at,
-    elapsed_seconds, combat_kills, combat_deaths, n_actions, dropped_items;
+    elapsed_seconds, combat_kills, combat_deaths, n_actions, dropped_items,
+    combat_items_scrapped, combat_scrap_gold;
 end;
 $$;
 
@@ -2324,7 +2495,9 @@ returns table (
   daily_idle_xp int,
   daily_idle_gold int,
   daily_reset_at date,
-  loot_drops jsonb -- see combat_action_result.loot_drops -- each entry here also carries the new equipment row's id, for an "equip now" action straight off the drop notification
+  loot_drops jsonb, -- see combat_action_result.loot_drops -- each entry here also carries the new equipment row's id, for an "equip now" action straight off the drop notification
+  items_scrapped int,    -- auto-scrapped this call, either by the player's
+  scrap_gold_gained int  -- own rarity settings or the bag hitting its cap -- see persist_loot_drops()/resolve_combat_action()
 )
 language plpgsql
 security definer
@@ -2339,6 +2512,8 @@ declare
   daily record;
   res combat_action_result;
   dropped_items jsonb := '[]'::jsonb;
+  overflow_scrapped int := 0;
+  overflow_scrap_gold int := 0;
   gear_mods jsonb;
 begin
   select * into p from profiles where id = auth.uid() for update;
@@ -2354,7 +2529,7 @@ begin
     return query select 0, 0, 0, 0, p.hp, p.max_hp, 0, 0, p.actions, true,
       '[]'::jsonb, coalesce(pc.pack, '[]'::jsonb), '[]'::jsonb, '[]'::jsonb, 0, 0,
       daily.daily_dmg_dealt, daily.daily_dmg_taken, daily.daily_kills, daily.daily_deaths,
-      daily.daily_idle_xp, daily.daily_idle_gold, daily.daily_reset_at, '[]'::jsonb;
+      daily.daily_idle_xp, daily.daily_idle_gold, daily.daily_reset_at, '[]'::jsonb, 0, 0;
     return;
   end if;
 
@@ -2363,7 +2538,7 @@ begin
     return query select 0, 0, 0, 0, p.hp, p.max_hp, 0, 0, p.actions, false,
       '[]'::jsonb, coalesce(pc.pack, '[]'::jsonb), '[]'::jsonb, '[]'::jsonb, 0, 0,
       daily.daily_dmg_dealt, daily.daily_dmg_taken, daily.daily_kills, daily.daily_deaths,
-      daily.daily_idle_xp, daily.daily_idle_gold, daily.daily_reset_at, '[]'::jsonb;
+      daily.daily_idle_xp, daily.daily_idle_gold, daily.daily_reset_at, '[]'::jsonb, 0, 0;
     return;
   end if;
 
@@ -2401,20 +2576,14 @@ begin
     where profile_id = auth.uid();
 
   -- Persist any rolled drops (see resolve_combat_action()'s loot_drops --
-  -- that function is pure and never touches the database itself). RETURNING
-  -- straight into dropped_items so the client's response also carries each
-  -- new item's real id, not just its rolled contents.
+  -- that function is pure and never touches the database itself).
+  -- persist_loot_drops() (see its own comment above) also enforces the bag
+  -- cap and auto-scraps any overflow, returning each new item's real id
+  -- (not just its rolled contents) alongside anything it had to scrap.
   if jsonb_array_length(res.loot_drops) > 0 then
-    with ins as (
-      insert into equipment (profile_id, slot, rarity, name, mods)
-      select p.id, d->>'slot', d->>'rarity', d->>'name', d->'mods'
-      from jsonb_array_elements(res.loot_drops) d
-      returning id, slot, rarity, name, mods
-    )
-    select coalesce(jsonb_agg(jsonb_build_object(
-      'id', ins.id, 'slot', ins.slot, 'rarity', ins.rarity, 'name', ins.name, 'mods', ins.mods
-    )), '[]'::jsonb) into dropped_items
-    from ins;
+    select p2.dropped_items, p2.overflow_scrapped, p2.overflow_scrap_gold
+      into dropped_items, overflow_scrapped, overflow_scrap_gold
+      from persist_loot_drops(p.id, res.loot_drops) p2;
   end if;
 
   return query select res.rounds_run, res.damage_dealt, res.kills, res.deaths, res.cur_player_hp, res.cur_player_max_hp,
@@ -2423,7 +2592,9 @@ begin
     (select coalesce(jsonb_agg(name), '[]'::jsonb) from debuff_defs where key in (select jsonb_array_elements_text(res.new_debuff_keys))),
     res.xp_lost, res.gold_lost,
     daily.daily_dmg_dealt, daily.daily_dmg_taken, daily.daily_kills, daily.daily_deaths,
-    daily.daily_idle_xp, daily.daily_idle_gold, daily.daily_reset_at, dropped_items;
+    daily.daily_idle_xp, daily.daily_idle_gold, daily.daily_reset_at, dropped_items,
+    coalesce(res.items_scrapped, 0) + overflow_scrapped,
+    coalesce(res.scrap_gold_gained, 0) + overflow_scrap_gold;
 end;
 $$;
 
@@ -2739,6 +2910,107 @@ begin
     raise exception 'item not found or not currently equipped';
   end if;
   return query select * from equipment where profile_id = auth.uid() order by slot, equipped_at nulls last;
+end;
+$$;
+
+-- scrap_equipment: manual, single-item scrap -- destroy one unequipped
+-- piece of gear for its scrap_value() (see that function's own comment) in
+-- gold. Refuses to scrap something currently equipped -- unequip it first,
+-- same "be explicit" spirit as equip_item()'s p_unequip_id requirement.
+-- This is the same primitive both auto-scrap-on-drop (resolve_combat_action(),
+-- by rarity) and the bag-cap overflow (persist_loot_drops()) reduce to
+-- internally, and cleanup_bag() below reduces to as well, just applied in
+-- bulk -- every scrap path in the game prices through scrap_value().
+create or replace function scrap_equipment(p_equipment_id uuid)
+returns table(gold_gained int, new_gold int)
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  item equipment%rowtype;
+  value int;
+  updated_gold int;
+begin
+  select * into item from equipment where id = p_equipment_id and profile_id = auth.uid();
+  if not found then
+    raise exception 'item not found';
+  end if;
+  if item.equipped_at is not null then
+    raise exception 'unequip this item before scrapping it';
+  end if;
+
+  value := scrap_value(item.rarity);
+  delete from equipment where id = p_equipment_id;
+  update profiles set gold = gold + value where id = auth.uid() returning gold into updated_gold;
+
+  return query select value, updated_gold;
+end;
+$$;
+
+-- set_auto_scrap_rarities: the player's standing "always scrap this rarity
+-- the instant it drops" list (see profiles.auto_scrap_rarities and
+-- resolve_combat_action()'s loot-roll branch, which is the only other place
+-- that reads it). Validated against the same rarity set equipment.rarity's
+-- own check constraint uses, so a bad value here can't silently no-op.
+create or replace function set_auto_scrap_rarities(p_rarities text[])
+returns setof profiles
+language plpgsql
+security definer
+set search_path = public
+as $$
+begin
+  if exists (
+    select 1 from unnest(coalesce(p_rarities, '{}'::text[])) r
+    where r not in ('junk','common','rare','epic','legendary','void_touched','void_spiraled')
+  ) then
+    raise exception 'invalid rarity in list';
+  end if;
+
+  update profiles set auto_scrap_rarities = coalesce(p_rarities, '{}'::text[]) where id = auth.uid();
+  return query select * from profiles where id = auth.uid();
+end;
+$$;
+
+-- cleanup_bag: "Clean Bag" button in the Inventory panel -- a bulk sweep
+-- that applies the player's OWN auto_scrap_rarities settings (the exact
+-- same list resolve_combat_action() already checks on every new drop) to
+-- everything currently sitting unequipped in the bag, not just future
+-- drops. Scraps in one batch (one count/sum, one delete, one gold update)
+-- rather than one scrap_equipment() call per item. A no-op, not an error,
+-- when the player hasn't turned on any auto-scrap rarities yet.
+create or replace function cleanup_bag()
+returns table(items_scrapped int, gold_gained int, new_gold int)
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  rarities text[];
+  scrapped int := 0;
+  gained int := 0;
+  updated_gold int;
+begin
+  select auto_scrap_rarities into rarities from profiles where id = auth.uid();
+
+  if rarities is null or array_length(rarities, 1) is null then
+    select gold into updated_gold from profiles where id = auth.uid();
+    return query select 0, 0, updated_gold;
+    return;
+  end if;
+
+  select count(*), coalesce(sum(scrap_value(rarity)), 0) into scrapped, gained
+    from equipment where profile_id = auth.uid() and equipped_at is null and rarity = any(rarities);
+
+  if scrapped > 0 then
+    delete from equipment
+      where profile_id = auth.uid() and equipped_at is null and rarity = any(rarities);
+    update profiles set gold = gold + gained where id = auth.uid() returning gold into updated_gold;
+  else
+    select gold into updated_gold from profiles where id = auth.uid();
+  end if;
+
+  return query select scrapped, gained, updated_gold;
 end;
 $$;
 
