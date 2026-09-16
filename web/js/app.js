@@ -14,6 +14,14 @@ const state = {
   pack: [],            // current enemy pack: [{ enemy_key, name, tier, hp, max_hp, attack, defense, xp, gold }, ...]
   equipment: [],       // every equipment row the player owns, equipped and not -- see loadEquipment() below, which is the only thing that ever (re)populates this
   inventoryRows: [],   // materials/trinkets (items/inventory catalog) -- see loadInventory() below. Rendered together with unequipped equipment in one panel, see renderInventoryPanel()
+  // Which equipment id currently occupies box 1 (index 0) vs box 2 (index 1)
+  // of the Ring/Relic equip slots -- explicit and sticky across renders
+  // rather than re-derived from state.equipment's fetch order every time
+  // (that used to be created_at-based, i.e. drop time, which has nothing to
+  // do with which physical box a swap should land in -- see
+  // reconcileEquipBoxAssignment()/equipItem() below). Helm/Weapon/Garb only
+  // ever have one box each, so they're not tracked here at all.
+  equipBoxAssignment: { ring: [null, null], relic: [null, null] },
 
   affixNames: [],      // display names of this pack's active affixes (enemy-side modifiers)
   debuffNames: [],     // display names of this pack's active debuffs (player-side, self-imposed)
@@ -1177,28 +1185,60 @@ async function loadEquipment() {
   renderAdditionalAffixes();
 }
 
+// Keeps state.equipBoxAssignment in sync with whatever's ACTUALLY equipped
+// right now, without reshuffling anything it doesn't have to: for each of
+// ring/relic, a box whose tracked id is no longer equipped (unequipped, or
+// swapped out via equipItem()'s own bookkeeping below already having moved
+// it) gets cleared to null, then any equipped id that isn't already
+// claimed by either box gets dropped into whichever box is still empty.
+// This is what makes the FIRST assignment (page load, or a brand-new
+// second ring just equipped into a previously-empty box) fall back to
+// state.equipment's own fetch order -- same as the old always-recompute
+// behavior -- while every assignment AFTER that stays put unless something
+// actually changed.
+function reconcileEquipBoxAssignment() {
+  ["ring", "relic"].forEach((slotType) => {
+    const equippedIds = new Set(
+      state.equipment.filter((e) => e.equipped_at && e.slot === slotType).map((e) => e.id)
+    );
+    const boxes = state.equipBoxAssignment[slotType];
+    for (let i = 0; i < boxes.length; i++) {
+      if (boxes[i] && !equippedIds.has(boxes[i])) boxes[i] = null;
+    }
+    const claimed = new Set(boxes.filter(Boolean));
+    const unclaimed = [...equippedIds].filter((id) => !claimed.has(id));
+    for (let i = 0; i < boxes.length && unclaimed.length; i++) {
+      if (!boxes[i]) boxes[i] = unclaimed.shift();
+    }
+  });
+}
+
 // Fills the 7 equip-slot boxes in index.html (eq-slot-helm/weapon/garb/
 // ring-0/ring-1/relic-0/relic-1) from state.equipment's currently-equipped
 // rows. Ring and Relic share one slot TYPE server-side (see equip_item()'s
-// comment in schema.sql) -- box 1 always gets bySlot[slot][0], box 2 always
-// gets bySlot[slot][1], stable within a render AND consistent with the
-// SAME state.equipment-filter order equipItem() in renderInventoryPanel()
-// re-derives when a bag item's left/right-click Equip needs to know which
-// of the two to replace -- so "box 2" here really is "slot index 1" there.
-// Labeled "Ring 1"/"Ring 2" (not just "Ring" twice) so that left-click/
-// right-click distinction is something the player can actually see.
+// comment in schema.sql) -- which specific equipped item lands in box 1 vs
+// box 2 comes from state.equipBoxAssignment (see reconcileEquipBoxAssignment()
+// above and equipItem() below), NOT from re-sorting state.equipment by fetch
+// order every render -- that used to be created_at (drop time), which has
+// nothing to do with which box a swap should land in and could silently
+// redisplay a "right-click to replace box 2" swap in box 1 instead. Labeled
+// "Ring 1"/"Ring 2" (not just "Ring" twice) so that left-click/right-click
+// distinction is something the player can actually see.
 function renderEquipmentSlots() {
+  reconcileEquipBoxAssignment();
+  const byId = new Map(state.equipment.map((e) => [e.id, e]));
+
   const equipped = state.equipment.filter((e) => e.equipped_at);
-  const bySlot = { helm: [], weapon: [], garb: [], ring: [], relic: [] };
-  equipped.forEach((e) => bySlot[e.slot]?.push(e));
+  const bySlot = { helm: [], weapon: [], garb: [] };
+  equipped.forEach((e) => { if (bySlot[e.slot]) bySlot[e.slot].push(e); });
 
   fillEquipSlot("eq-slot-helm", "Helm", bySlot.helm[0]);
   fillEquipSlot("eq-slot-weapon", "Weapon", bySlot.weapon[0]);
   fillEquipSlot("eq-slot-garb", "Garb", bySlot.garb[0]);
-  fillEquipSlot("eq-slot-ring-0", "Ring 1", bySlot.ring[0]);
-  fillEquipSlot("eq-slot-ring-1", "Ring 2", bySlot.ring[1]);
-  fillEquipSlot("eq-slot-relic-0", "Relic 1", bySlot.relic[0]);
-  fillEquipSlot("eq-slot-relic-1", "Relic 2", bySlot.relic[1]);
+  fillEquipSlot("eq-slot-ring-0", "Ring 1", byId.get(state.equipBoxAssignment.ring[0]));
+  fillEquipSlot("eq-slot-ring-1", "Ring 2", byId.get(state.equipBoxAssignment.ring[1]));
+  fillEquipSlot("eq-slot-relic-0", "Relic 1", byId.get(state.equipBoxAssignment.relic[0]));
+  fillEquipSlot("eq-slot-relic-1", "Relic 2", byId.get(state.equipBoxAssignment.relic[1]));
 }
 
 function fillEquipSlot(elId, label, item) {
@@ -1393,18 +1433,28 @@ async function equipItem(id, unequipId, preferredSlotIndex) {
       if (equippedInSlot.length === 1) {
         // Helm/Weapon/Garb: only one possible item occupies the slot, so
         // there's nothing to ask -- just swap it.
-        await equipItem(id, equippedInSlot[0].id);
+        await equipItem(id, equippedInSlot[0].id, preferredSlotIndex);
         return;
       }
       if (equippedInSlot.length > 1) {
-        // Ring/Relic: two equipped pieces. Use the left/right-click
-        // preference when we have one; otherwise fall back to asking, same
-        // as before this existed (e.g. if this function is ever called
-        // from somewhere that doesn't have a left/right click to key off).
-        const preferred = preferredSlotIndex != null ? equippedInSlot[preferredSlotIndex] : null;
-        const chosenId = preferred ? preferred.id : chooseReplacementId(equippedInSlot);
+        // Ring/Relic: two equipped pieces. preferredSlotIndex (0 or 1, from
+        // a left/right-click -- see renderInventoryPanel()) is resolved
+        // against state.equipBoxAssignment -- the SAME source of truth
+        // renderEquipmentSlots() uses to decide what's actually shown in
+        // box 1 vs box 2. BUG this fixes: this used to index straight into
+        // equippedInSlot (a freshly re-filtered array, ordered by
+        // state.equipment's fetch order/created_at) instead, which is NOT
+        // necessarily the same order the two boxes were actually rendered
+        // in -- a right-click meant to replace box 2 could end up
+        // replacing whatever was in box 1 instead. Falls back to asking
+        // via chooseReplacementId() only if the assignment doesn't have an
+        // answer (e.g. called from somewhere with no left/right-click
+        // behind it).
+        const boxes = item ? state.equipBoxAssignment[item.slot] : null;
+        const targetId = boxes && preferredSlotIndex != null ? boxes[preferredSlotIndex] : null;
+        const chosenId = targetId || chooseReplacementId(equippedInSlot);
         if (chosenId) {
-          await equipItem(id, chosenId);
+          await equipItem(id, chosenId, preferredSlotIndex);
         }
         return;
       }
@@ -1412,6 +1462,24 @@ async function equipItem(id, unequipId, preferredSlotIndex) {
     alert(error.message);
     return;
   }
+
+  // Swap bookkeeping: if this call replaced a specific equipped item
+  // (unequipId set), whichever box was tracking it (state.equipBoxAssignment)
+  // should now track the NEW item instead, so the swap visibly lands in the
+  // box the player targeted rather than wherever reconcileEquipBoxAssignment()
+  // would otherwise guess on the next render. Do this BEFORE loadEquipment()
+  // overwrites state.equipment, since it's the last point unequipId's own
+  // .slot is still readable.
+  if (unequipId) {
+    const replaced = state.equipment.find((e) => e.id === unequipId);
+    const slotType = replaced?.slot;
+    const boxes = slotType ? state.equipBoxAssignment[slotType] : null;
+    if (boxes) {
+      const boxIndex = boxes.indexOf(unequipId);
+      if (boxIndex !== -1) boxes[boxIndex] = id;
+    }
+  }
+
   await loadEquipment();
 }
 

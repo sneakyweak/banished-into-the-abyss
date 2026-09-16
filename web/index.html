@@ -573,8 +573,14 @@
        0.100) if the player explicitly asks for a bigger jump for that
        round. -->
   <script>
-    window.APP_VERSION = "0.016";
+    window.APP_VERSION = "0.017";
     window.PATCH_NOTES = [
+      {
+        "version": "0.017",
+        "notes": [
+          "Fixed the left-click/right-click Ring and Relic slot targeting from the last update -- a swap could land in the wrong box on screen even though it replaced the right item. Box 1 and box 2 now stay put once assigned, instead of getting reshuffled by drop order on every refresh."
+        ]
+      },
       {
         "version": "0.016",
         "notes": [
