@@ -1799,7 +1799,30 @@ begin
   where id = p.id
   returning * into p;
 
-  delete from player_combat where profile_id = p.id;
+  -- BUGFIX (reported "daily totals don't seem to track properly"): this used
+  -- to be `delete from player_combat`, which wipes the ENTIRE row -- not just
+  -- the in-progress pack this comment says it's clearing, but also that same
+  -- row's daily_dmg_dealt/daily_dmg_taken/daily_kills/daily_deaths/
+  -- daily_idle_xp/daily_idle_gold/daily_reset_at columns (see bump_daily_stats
+  -- above), since "Daily Totals" lives on player_combat rather than profiles.
+  -- Difficulty settings are something players plausibly retune several times
+  -- a day, and every save was silently zeroing the daily counters as a side
+  -- effect -- nothing about changing pack size/affix/debuff count should
+  -- touch a same-day running total. Clear only the actual combat-state
+  -- columns instead; get_or_spawn_pack()'s "no live pack" check already
+  -- treats an empty pack array exactly like a missing row (see its `not
+  -- found or not exists(...)` condition), so the next strike still spawns
+  -- fresh under the new settings -- this only stops it from also clobbering
+  -- daily_*. A brand-new player with no player_combat row yet simply matches
+  -- zero rows here, same as the delete did before.
+  update player_combat set
+    pack = '[]'::jsonb,
+    affix_keys = '[]'::jsonb,
+    debuff_keys = '[]'::jsonb,
+    bracket_used = 0, -- not-null column; get_or_spawn_pack() overwrites this the next time it actually spawns a pack
+    last_strike_at = null,
+    updated_at = now()
+  where profile_id = p.id;
 
   return p;
 end;
@@ -3564,7 +3587,26 @@ begin
   -- Keeps itemization from ever becoming a second, ungoverned retention
   -- channel running alongside the real one.
   delete from equipment where profile_id = p.id;
-  delete from player_combat where profile_id = p.id;
+  -- BUGFIX (reported "daily totals don't seem to track properly"): same fix
+  -- as set_encounter_settings() above -- this used to `delete from
+  -- player_combat`, which also destroys that row's daily_dmg_dealt/
+  -- daily_dmg_taken/daily_kills/daily_deaths/daily_idle_xp/daily_idle_gold/
+  -- daily_reset_at columns (see bump_daily_stats), not just the in-progress
+  -- pack. Banishing is the core loop of this game -- players do it repeatedly
+  -- all day -- so every single Banishment was silently zeroing "Daily
+  -- Totals" back to 0, which is exactly why the counter never looked like it
+  -- was accumulating across a real day. Clear only the combat-state columns;
+  -- get_or_spawn_pack() already treats an empty pack array the same as a
+  -- missing row, so the next strike still spawns a fresh pack under the new
+  -- (post-Banishment) stats -- this only stops it from also wiping daily_*.
+  update player_combat set
+    pack = '[]'::jsonb,
+    affix_keys = '[]'::jsonb,
+    debuff_keys = '[]'::jsonb,
+    bracket_used = 0, -- not-null column; get_or_spawn_pack() overwrites this the next time it actually spawns a pack
+    last_strike_at = null,
+    updated_at = now()
+  where profile_id = p.id;
 
   return p;
 end;

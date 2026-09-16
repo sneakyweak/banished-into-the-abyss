@@ -587,8 +587,15 @@
        0.100) if the player explicitly asks for a bigger jump for that
        round. -->
   <script>
-    window.APP_VERSION = "0.022";
+    window.APP_VERSION = "0.023";
     window.PATCH_NOTES = [
+      {
+        "version": "0.023",
+        "notes": [
+          "Combat Stats and your HP bar now show your actual current numbers (with class and gear bonuses already folded in), instead of a base number plus a separate \"+X%\" note -- what you see is exactly what your next fight will use.",
+          "Fixed a real bug: your Daily Totals were getting silently wiped back to 0 every time you saved new Difficulty Settings or Banished -- not just at the actual daily reset. Both actions now only reset your in-progress pack like they're supposed to, and leave your running daily damage/kills/idle totals alone."
+        ]
+      },
       {
         "version": "0.022",
         "notes": [

@@ -597,15 +597,6 @@ async function loadCatalogCounts() {
   if (!debuffRes.error && typeof debuffRes.count === "number") state.maxDebuffCount = debuffRes.count;
 }
 
-// "1 (+5%)" / "1 (-20%)" / "1" (no annotation when the class has no mod
-// for this stat) -- keeps the base number itself an honest, unmodified
-// value (what gear will actually move later) while still surfacing the
-// class's effect right next to it.
-function formatStatWithClassPct(base, pct) {
-  if (!pct) return String(base);
-  return `${base} (${pct > 0 ? "+" : ""}${pct}%)`;
-}
-
 // The eight standard-stat keys gear can actually roll (roll_loot()'s
 // standard_pool in schema.sql) -- Power/Defense/Vitality/Attack Speed/Crit/
 // Multi Strike/Speed/Evasion. Mirrors RELIC_STAT_ORDER's role for the
@@ -690,20 +681,34 @@ function renderProfile() {
   // from the player's class (see CLASS_MODS above / class_defs in
   // schema.sql) that strike_enemy() applies during every fight but never
   // writes back to these raw profiles columns -- so showing p.attack etc.
-  // alone silently hid the class entirely from this panel. Power/Defense
-  // keep the base number (gear will actually move that number later) with
-  // the class's live percent bonus alongside it; Crit/Multi Strike show
-  // the resolved total directly since there's no other source for them yet.
-  // Equipped gear (BUGFIX, see computeEquippedGearMods()'s comment above)
-  // is folded in right alongside the class bonus -- gearPct()/gearFlat()
-  // below just add whatever's currently equipped on top of the class's own
-  // number, mirroring exactly how sum_mods() combines the two server-side.
+  // alone silently hid the class entirely from this panel. Equipped gear
+  // (BUGFIX, see computeEquippedGearMods()'s comment above) is folded in
+  // right alongside the class bonus -- gearFlat() below just adds whatever's
+  // currently equipped on top of the class's own number, mirroring exactly
+  // how sum_mods() combines the two server-side.
+  //
+  // Power/Defense/Attack Speed/Speed show the RESOLVED number (base stat
+  // with its class+gear percent already applied), not the base number plus
+  // a "(+29%)" annotation -- that used to be the display (a leftover from
+  // before gear was even factored in, back when the base number WAS the
+  // real number and the annotation was the only place a bonus showed up at
+  // all). Once gear started contributing too, showing the un-boosted base
+  // number as the headline figure read as "this is what I actually have"
+  // when it wasn't -- the resolved value is what actually goes into combat
+  // math (compute_damage()'s eff_attack/eff_defense, rounds_soft_budget's
+  // attack_speed term), so it's what belongs on the panel now.
   const classMods = CLASS_MODS[p.class] || {};
   const gearMods = computeEquippedGearMods();
   const gearFlat = (key) => (classMods[key] || 0) + (gearMods[key] || 0);
-  $("stat-power").textContent = formatStatWithClassPct(p.attack, gearFlat("attack_pct"));
-  $("stat-defense").textContent = formatStatWithClassPct(p.defense, gearFlat("defense_pct"));
-  $("stat-attack-speed").textContent = formatStatWithClassPct(p.attack_speed, gearFlat("attack_speed_pct"));
+  const resolved = (base, pct) => base * (1 + pct / 100);
+  $("stat-power").textContent = Math.round(resolved(p.attack, gearFlat("attack_pct")));
+  $("stat-defense").textContent = Math.round(resolved(p.defense, gearFlat("defense_pct")));
+  // Attack Speed's base (profiles.attack_speed, default 1.0) is meaningfully
+  // fractional, unlike Power/Defense/Speed's whole-number bases -- rounding
+  // it to the nearest integer would flatten a real 1.05 vs 1.0 difference
+  // down to the same displayed "1", so this one keeps up to 2 decimals
+  // (trimmed of trailing zeros) instead of a plain Math.round().
+  $("stat-attack-speed").textContent = Math.round(resolved(p.attack_speed, gearFlat("attack_speed_pct")) * 100) / 100;
   $("stat-crit").textContent = `${p.crit + gearFlat("crit_chance_flat")}%`;
   // Crit Damage is its own profiles column (crit_damage), same "raw
   // percentage" shape as Crit itself -- mirrors compute_damage()'s
@@ -712,26 +717,29 @@ function renderProfile() {
   // class bonus applies here -- nothing missing from gearMods.
   $("stat-crit-damage").textContent = `${p.crit_damage + (classMods.crit_damage_flat || 0)}%`;
   $("stat-multi-strike").textContent = `${p.multi_strike + gearFlat("multi_strike_flat")}%`;
-  $("stat-speed").textContent = formatStatWithClassPct(p.speed, gearFlat("speed_pct"));
+  $("stat-speed").textContent = Math.round(resolved(p.speed, gearFlat("speed_pct")));
   // Evasion is derived from Speed, not its own profiles column -- mirrors
   // cur_player_evasion_pct in strike_enemy() (1 Speed = 1% Evasion, plus
   // any evasion_flat mod from class or gear, hard-capped at 25% total).
+  // Deliberately reads the RAW p.speed here, not the speed_pct-resolved
+  // value above -- matches the server exactly (cur_player_evasion_pct never
+  // applies speed_pct, only evasion_flat; speed_pct only affects initiative,
+  // via cur_player_speed, a separate value).
   const evasionPct = Math.min(25, Math.max(0, p.speed + gearFlat("evasion_flat")));
   $("stat-evasion").textContent = `${evasionPct}%`;
 
-  const hpPct = Math.max(0, Math.min(100, (p.hp / p.max_hp) * 100));
-  $("player-hp-fill").style.width = hpPct + "%";
   // Vitality (hp_pct, class + gear) doesn't change p.max_hp itself -- same
   // "combat-time-only modifier, never written back to the base column"
   // treatment every other gear stat gets (see resolve_combat_action()'s
-  // cur_player_max_hp in schema.sql) -- but it's still worth surfacing here,
-  // same spirit as the "(+X%)" annotations above, so equipping a Vitality
-  // roll doesn't read as doing nothing just because the bar's raw numbers
-  // don't move.
-  const vitalityPct = gearFlat("hp_pct");
-  $("player-hp-text").textContent = vitalityPct > 0
-    ? `${p.hp} / ${p.max_hp} HP (+${vitalityPct}% Vitality in combat)`
-    : `${p.hp} / ${p.max_hp} HP`;
+  // cur_player_max_hp in schema.sql). The HP bar now shows the RESOLVED max
+  // (what a fight would actually use as your ceiling right now), same "show
+  // the real number, not a base-plus-annotation" change as the stats above,
+  // instead of the raw stored max_hp with a separate "+X% Vitality" note
+  // bolted on next to it.
+  const effectiveMaxHp = Math.round(resolved(p.max_hp, gearFlat("hp_pct")));
+  const hpPct = Math.max(0, Math.min(100, (p.hp / effectiveMaxHp) * 100));
+  $("player-hp-fill").style.width = hpPct + "%";
+  $("player-hp-text").textContent = `${p.hp} / ${effectiveMaxHp} HP`;
 
   renderEncounterSettings();
   renderAutoScrapSettings();
