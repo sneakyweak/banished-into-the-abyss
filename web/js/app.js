@@ -1180,9 +1180,13 @@ async function loadEquipment() {
 // Fills the 7 equip-slot boxes in index.html (eq-slot-helm/weapon/garb/
 // ring-0/ring-1/relic-0/relic-1) from state.equipment's currently-equipped
 // rows. Ring and Relic share one slot TYPE server-side (see equip_item()'s
-// comment in schema.sql) -- the split into two boxes here is purely this
-// function picking which of the (at most 2) equipped rows goes in which
-// box, arbitrary but stable within a single render.
+// comment in schema.sql) -- box 1 always gets bySlot[slot][0], box 2 always
+// gets bySlot[slot][1], stable within a render AND consistent with the
+// SAME state.equipment-filter order equipItem() in renderInventoryPanel()
+// re-derives when a bag item's left/right-click Equip needs to know which
+// of the two to replace -- so "box 2" here really is "slot index 1" there.
+// Labeled "Ring 1"/"Ring 2" (not just "Ring" twice) so that left-click/
+// right-click distinction is something the player can actually see.
 function renderEquipmentSlots() {
   const equipped = state.equipment.filter((e) => e.equipped_at);
   const bySlot = { helm: [], weapon: [], garb: [], ring: [], relic: [] };
@@ -1191,10 +1195,10 @@ function renderEquipmentSlots() {
   fillEquipSlot("eq-slot-helm", "Helm", bySlot.helm[0]);
   fillEquipSlot("eq-slot-weapon", "Weapon", bySlot.weapon[0]);
   fillEquipSlot("eq-slot-garb", "Garb", bySlot.garb[0]);
-  fillEquipSlot("eq-slot-ring-0", "Ring", bySlot.ring[0]);
-  fillEquipSlot("eq-slot-ring-1", "Ring", bySlot.ring[1]);
-  fillEquipSlot("eq-slot-relic-0", "Relic", bySlot.relic[0]);
-  fillEquipSlot("eq-slot-relic-1", "Relic", bySlot.relic[1]);
+  fillEquipSlot("eq-slot-ring-0", "Ring 1", bySlot.ring[0]);
+  fillEquipSlot("eq-slot-ring-1", "Ring 2", bySlot.ring[1]);
+  fillEquipSlot("eq-slot-relic-0", "Relic 1", bySlot.relic[0]);
+  fillEquipSlot("eq-slot-relic-1", "Relic 2", bySlot.relic[1]);
 }
 
 function fillEquipSlot(elId, label, item) {
@@ -1302,9 +1306,30 @@ function renderInventoryPanel() {
       equipBtn.type = "button";
       equipBtn.className = "btn-ghost btn-small";
       equipBtn.textContent = "Equip";
+      // Ring/Relic have 2 equip-slot boxes (see EQ_SLOT_ORDER/
+      // renderEquipmentSlots() -- labeled "Ring 1"/"Ring 2" etc there so
+      // this is discoverable): left-click always targets box 1, right-click
+      // targets box 2. Only matters when BOTH are already full -- with an
+      // open slot, equip_item() just fills it and preferredSlotIndex is
+      // never consulted (see equipItem() below). Helm/Weapon/Garb only ever
+      // have one box, so the distinction is moot there, but wiring both
+      // handlers unconditionally is harmless (equippedInSlot.length is
+      // never >1 for those slots).
+      if (item.slot === "ring" || item.slot === "relic") {
+        // Plain title attribute, not data-tooltip (see makeInventorySubheader's
+        // sibling rows for other title usage) -- data-tooltip's [data-tooltip]
+        // CSS gives stat labels a dotted underline + "help" cursor, which
+        // doesn't fit a button that's already clickable in its own right.
+        equipBtn.title = "Left-click: equip as slot 1. Right-click: equip as slot 2 (when both are full).";
+      }
       equipBtn.addEventListener("click", (e) => {
         e.stopPropagation();
-        equipItem(item.id);
+        equipItem(item.id, undefined, 0);
+      });
+      equipBtn.addEventListener("contextmenu", (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        equipItem(item.id, undefined, 1);
       });
       actions.appendChild(equipBtn);
 
@@ -1345,8 +1370,15 @@ function makeInventorySubheader(text) {
 // into an open slot" call; this function fills it in itself and retries
 // when the server reports the slot's already full, so the player just gets
 // a swap instead of an error dialog telling them to go unequip something
-// first.
-async function equipItem(id, unequipId) {
+// first. preferredSlotIndex (0 or 1) is which of Ring/Relic's two equipped
+// pieces to replace when BOTH are full -- 0 for box 1 (eq-slot-ring-0/
+// eq-slot-relic-0), 1 for box 2, matching renderEquipmentSlots()'
+// left-to-right box order (see the Equip button's left-click/right-click
+// handlers in renderInventoryPanel()). Left undefined/null when there's no
+// such preference (e.g. Helm/Weapon/Garb, where it's never consulted
+// anyway) -- chooseReplacementId()'s confirm() dialogs are still the
+// fallback for that case, kept around rather than removed.
+async function equipItem(id, unequipId, preferredSlotIndex) {
   const { error } = await sb.rpc("equip_item", { p_equipment_id: id, p_unequip_id: unequipId ?? null });
   if (error) {
     // Only auto-swap on the FIRST attempt (unequipId not already set) --
@@ -1365,9 +1397,12 @@ async function equipItem(id, unequipId) {
         return;
       }
       if (equippedInSlot.length > 1) {
-        // Ring/Relic: two equipped pieces, so it's genuinely ambiguous
-        // which one the player means to replace -- ask instead of guessing.
-        const chosenId = chooseReplacementId(equippedInSlot);
+        // Ring/Relic: two equipped pieces. Use the left/right-click
+        // preference when we have one; otherwise fall back to asking, same
+        // as before this existed (e.g. if this function is ever called
+        // from somewhere that doesn't have a left/right click to key off).
+        const preferred = preferredSlotIndex != null ? equippedInSlot[preferredSlotIndex] : null;
+        const chosenId = preferred ? preferred.id : chooseReplacementId(equippedInSlot);
         if (chosenId) {
           await equipItem(id, chosenId);
         }

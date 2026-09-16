@@ -294,23 +294,27 @@
       <div class="col-side">
         <section class="panel equipment-panel">
           <h2 class="panel-title">Equipment</h2>
-          <p class="log">Click a filled slot to unequip. Click "Equip" on a Gear item below to fill an open slot.</p>
+          <p class="log">Click a filled slot to unequip. On a Gear item below, left-click "Equip" for slot 1, right-click for slot 2 (Ring/Relic only -- matters when both are already full).</p>
           <!-- Helm sits alone, centered above the rest, like a head slot on
                a classic equipment doll -- Weapon now takes the spot in the
                grid Helm used to occupy. Ring/Relic each have 2 physical
                boxes but share one slot TYPE server-side (equip_item() only
                tracks "how many of this slot are equipped", not which box --
-               see its comment in schema.sql) -- the two boxes here are
-               purely a rendering choice, filled in whatever order
-               renderEquipmentSlots() in app.js gets them back in. -->
+               see its comment in schema.sql). Box 1/box 2 here is filled in
+               whatever order renderEquipmentSlots() in app.js gets them
+               back in (stable within a render), and is now also what a bag
+               item's left-click ("slot 1")/right-click ("slot 2") Equip
+               targets when both boxes are full -- see equipItem() there.
+               Labeled "Ring 1"/"Ring 2" (not just "Ring" twice) so that
+               distinction is visible, not just implied by position. -->
           <div id="eq-slot-helm" class="equip-slot equip-slot-centered"><span class="equip-slot-label">Helm</span></div>
           <div class="equip-grid">
             <div id="eq-slot-weapon" class="equip-slot"><span class="equip-slot-label">Weapon</span></div>
             <div id="eq-slot-garb" class="equip-slot"><span class="equip-slot-label">Garb</span></div>
-            <div id="eq-slot-ring-0" class="equip-slot"><span class="equip-slot-label">Ring</span></div>
-            <div id="eq-slot-ring-1" class="equip-slot"><span class="equip-slot-label">Ring</span></div>
-            <div id="eq-slot-relic-0" class="equip-slot"><span class="equip-slot-label">Relic</span></div>
-            <div id="eq-slot-relic-1" class="equip-slot"><span class="equip-slot-label">Relic</span></div>
+            <div id="eq-slot-ring-0" class="equip-slot"><span class="equip-slot-label">Ring 1</span></div>
+            <div id="eq-slot-ring-1" class="equip-slot"><span class="equip-slot-label">Ring 2</span></div>
+            <div id="eq-slot-relic-0" class="equip-slot"><span class="equip-slot-label">Relic 1</span></div>
+            <div id="eq-slot-relic-1" class="equip-slot"><span class="equip-slot-label">Relic 2</span></div>
           </div>
         </section>
 
@@ -569,8 +573,15 @@
        0.100) if the player explicitly asks for a bigger jump for that
        round. -->
   <script>
-    window.APP_VERSION = "0.015";
+    window.APP_VERSION = "0.016";
     window.PATCH_NOTES = [
+      {
+        "version": "0.016",
+        "notes": [
+          "Equipping a Ring or Relic from your bag: left-click Equip to fill/replace slot 1, right-click to fill/replace slot 2 -- no more guessing dialog when both are already full.",
+          "The Equipment panel's two Ring and two Relic boxes are now labeled \"1\"/\"2\" so it's clear which is which."
+        ]
+      },
       {
         "version": "0.015",
         "notes": [
