@@ -587,8 +587,14 @@
        0.100) if the player explicitly asks for a bigger jump for that
        round. -->
   <script>
-    window.APP_VERSION = "0.023";
+    window.APP_VERSION = "0.024";
     window.PATCH_NOTES = [
+      {
+        "version": "0.024",
+        "notes": [
+          "Fixed a real bug: the \"new patch available\" popup could get silently buried behind the Welcome Back summary if both showed up at the same time (very common -- both trigger on returning to the game). You'll now always see the patch announcement, with Welcome Back appearing right after you dismiss it instead of hiding it."
+        ]
+      },
       {
         "version": "0.023",
         "notes": [

@@ -376,6 +376,26 @@ button:disabled { opacity: 0.4; cursor: not-allowed; }
   padding: 16px;
   z-index: 100;
 }
+/* BUGFIX (reported "patches aren't popping up -- the last one never
+   appeared"): every .overlay above shares the same z-index (100), so two
+   overlays showing at once stack purely by DOM order -- and #new-version-
+   overlay sits BEFORE #welcome-back-overlay in index.html, so whichever one
+   showed second (later in paint order) buried the other completely behind
+   its own opaque, blurred backdrop, not just visually on top of it. This was
+   silent, not a rare edge case: maybeShowWelcomeBackSummary() in app.js
+   fires on being away just 60+ seconds (WELCOME_BACK_MIN_SECONDS), and
+   checkNewVersion()/pollForNewVersion() fire on that same "just opened/
+   returned to the tab" moment a new deploy would actually be noticed on --
+   so a returning player who'd missed a patch almost always got Welcome Back
+   painted directly over the new-version popup, never saw the popup at all,
+   and had no way to know it was even there. Deliberately bumping only this
+   one overlay above the shared 100 (rather than reshuffling every overlay's
+   z-index) makes the version announcement always win that particular
+   collision without touching how any of the other overlays layer among
+   themselves. */
+#new-version-overlay {
+  z-index: 200;
+}
 .overlay-panel {
   position: relative;
   width: 100%;
