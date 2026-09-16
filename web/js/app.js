@@ -1252,16 +1252,62 @@ function makeInventorySubheader(text) {
   return li;
 }
 
-async function equipItem(id) {
-  const { error } = await sb.rpc("equip_item", { p_equipment_id: id });
+// unequipId is the item to bump out of the slot to make room -- see
+// equip_item()'s p_unequip_id in schema.sql. Omitted on the normal "equip
+// into an open slot" call; this function fills it in itself and retries
+// when the server reports the slot's already full, so the player just gets
+// a swap instead of an error dialog telling them to go unequip something
+// first.
+async function equipItem(id, unequipId) {
+  const { error } = await sb.rpc("equip_item", { p_equipment_id: id, p_unequip_id: unequipId ?? null });
   if (error) {
-    // most likely "that slot is already full" (see equip_item in
-    // schema.sql) -- surfaced directly rather than silently no-op'ing, so
-    // the player knows to unequip something in that slot first.
+    // Only auto-swap on the FIRST attempt (unequipId not already set) --
+    // if a swap retry itself fails (e.g. someone else already unequipped
+    // p_unequip_id in another tab), fall through to the plain alert below
+    // instead of looping.
+    if (!unequipId && /already full/i.test(error.message || "")) {
+      const item = state.equipment.find((e) => e.id === id);
+      const equippedInSlot = item
+        ? state.equipment.filter((e) => e.equipped_at && e.slot === item.slot)
+        : [];
+      if (equippedInSlot.length === 1) {
+        // Helm/Weapon/Garb: only one possible item occupies the slot, so
+        // there's nothing to ask -- just swap it.
+        await equipItem(id, equippedInSlot[0].id);
+        return;
+      }
+      if (equippedInSlot.length > 1) {
+        // Ring/Relic: two equipped pieces, so it's genuinely ambiguous
+        // which one the player means to replace -- ask instead of guessing.
+        const chosenId = chooseReplacementId(equippedInSlot);
+        if (chosenId) {
+          await equipItem(id, chosenId);
+        }
+        return;
+      }
+    }
     alert(error.message);
     return;
   }
   await loadEquipment();
+}
+
+// Ring/Relic have 2 equip slots, so swapping in a new one when both are
+// full needs the player to say which of the two currently-equipped pieces
+// to bump -- at most two confirm() dialogs (matches scrapItem()'s existing
+// confirm-before-destructive-action style rather than introducing a new UI
+// pattern for a two-way choice). Returns the chosen item's id, or null if
+// the player backed out of both prompts (equipItem() then leaves the bag
+// item unequipped rather than forcing a choice).
+function chooseReplacementId(equippedInSlot) {
+  const [a, b] = equippedInSlot;
+  if (confirm(`Both slots are full. Replace ${a.name}? (Cancel to replace ${b.name} instead)`)) {
+    return a.id;
+  }
+  if (confirm(`Replace ${b.name} instead?`)) {
+    return b.id;
+  }
+  return null;
 }
 
 async function unequipItem(id) {
